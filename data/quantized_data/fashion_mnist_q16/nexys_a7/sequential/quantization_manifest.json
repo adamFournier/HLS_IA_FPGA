@@ -9,7 +9,7 @@
     "architecture": "sequential",
     "dsp_bits": 48,
     "device": "cpu",
-    "weight_bits": 16,
+    "weight_bits": 8,
     "bias_bits": 16,
     "act_bits": 16,
     "margin_weights": 0.0,
@@ -41,7 +41,7 @@
     ]
   },
   "quant_config": {
-    "weight_bits": 16,
+    "weight_bits": 8,
     "bias_bits": 16,
     "act_bits": 16,
     "dsp_bits": 48,
@@ -82,13 +82,13 @@
     "output_exp": 7,
     "overflow_count": 0,
     "float_accuracy": 0.9373166666666667,
-    "board_accuracy": 0.9371833333333334,
-    "class_agreement": 0.99975,
-    "exact_output_words_vs_float_quantized": 213677,
+    "board_accuracy": 0.9347,
+    "class_agreement": 0.9920666666666667,
+    "exact_output_words_vs_float_quantized": 9156,
     "total_output_words": 600000,
-    "exact_samples_vs_float_quantized": 4,
-    "mean_abs_lsb_vs_float_quantized": 0.8634433333333333,
-    "max_abs_lsb_vs_float_quantized": 6
+    "exact_samples_vs_float_quantized": 0,
+    "mean_abs_lsb_vs_float_quantized": 23.562391666666667,
+    "max_abs_lsb_vs_float_quantized": 203
   },
   "rtl_project": {
     "mode": "sequential",
@@ -128,7 +128,7 @@
       "description": "V2 sequential layout. ACT_W is shared by network input, activations, LUT words and final output.",
       "bits": {
         "act_bits": 16,
-        "weight_bits": 16,
+        "weight_bits": 8,
         "bias_bits": 16,
         "dsp_bits": 48
       },
@@ -237,7 +237,7 @@
     "total_activation_words": 0,
     "split_exports": null,
     "act_width": 16,
-    "weight_width": 16,
+    "weight_width": 8,
     "bias_width": 16,
     "dsp_width": 48
   }

@@ -3,7 +3,7 @@
   "description": "V2 sequential layout. ACT_W is shared by network input, activations, LUT words and final output.",
   "bits": {
     "act_bits": 16,
-    "weight_bits": 16,
+    "weight_bits": 8,
     "bias_bits": 16,
     "dsp_bits": 48
   },

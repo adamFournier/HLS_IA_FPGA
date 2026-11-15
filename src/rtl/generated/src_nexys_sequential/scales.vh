@@ -6,7 +6,7 @@
 
 // V2 numerical widths
 `define ACT_W       16
-`define WEIGHT_W    16
+`define WEIGHT_W    8
 `define BIAS_W      16
 `define DSP_PW      48
 
@@ -35,19 +35,19 @@
 // -----------------------------------------------------------------------------
 // Couche 0
 `define SX0 14
-`define SW0 14
+`define SW0 6
 `define SB0 15
 `define SP0 9
 
 // Couche 1
 `define SX1 10
-`define SW1 14
+`define SW1 6
 `define SB1 15
 `define SP1 9
 
 // Couche 2
 `define SX2 10
-`define SW2 14
+`define SW2 6
 `define SB2 16
 
 // Network output
