@@ -1,0 +1,109 @@
+{
+  "format": "concat_mem_v1",
+  "description": "V2 sequential layout. ACT_W is shared by network input, activations, LUT words and final output.",
+  "bits": {
+    "act_bits": 16,
+    "weight_bits": 16,
+    "bias_bits": 16,
+    "dsp_bits": 48
+  },
+  "weight_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\ultra96\\sequential\\weight_all.mem",
+  "bias_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\ultra96\\sequential\\bias_all.mem",
+  "act_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\ultra96\\sequential\\act_all.mem",
+  "weights": [
+    {
+      "layer_name": "layer_0",
+      "layer_idx": 0,
+      "offset": 0,
+      "length": 50176,
+      "shape": [
+        64,
+        784
+      ]
+    },
+    {
+      "layer_name": "layer_1",
+      "layer_idx": 1,
+      "offset": 50176,
+      "length": 2048,
+      "shape": [
+        32,
+        64
+      ]
+    },
+    {
+      "layer_name": "layer_2",
+      "layer_idx": 2,
+      "offset": 52224,
+      "length": 320,
+      "shape": [
+        10,
+        32
+      ]
+    }
+  ],
+  "biases": [
+    {
+      "layer_name": "layer_0",
+      "layer_idx": 0,
+      "offset": 0,
+      "length": 64,
+      "shape": [
+        64
+      ]
+    },
+    {
+      "layer_name": "layer_1",
+      "layer_idx": 1,
+      "offset": 64,
+      "length": 32,
+      "shape": [
+        32
+      ]
+    },
+    {
+      "layer_name": "layer_2",
+      "layer_idx": 2,
+      "offset": 96,
+      "length": 10,
+      "shape": [
+        10
+      ]
+    }
+  ],
+  "activations": [
+    {
+      "layer_name": "layer_0",
+      "layer_idx": 0,
+      "offset": 0,
+      "length": 0,
+      "activation_name": "leaky_relu",
+      "implementation": "analytic_int",
+      "addr_bits": null,
+      "reordered_for_hdl_raw_addressing": false
+    },
+    {
+      "layer_name": "layer_1",
+      "layer_idx": 1,
+      "offset": 0,
+      "length": 0,
+      "activation_name": "leaky_relu",
+      "implementation": "analytic_int",
+      "addr_bits": null,
+      "reordered_for_hdl_raw_addressing": false
+    },
+    {
+      "layer_name": "layer_2",
+      "layer_idx": 2,
+      "offset": 0,
+      "length": 0,
+      "activation_name": null,
+      "implementation": "none",
+      "addr_bits": null,
+      "reordered_for_hdl_raw_addressing": false
+    }
+  ],
+  "total_weight_words": 52544,
+  "total_bias_words": 106,
+  "total_activation_words": 0
+}
