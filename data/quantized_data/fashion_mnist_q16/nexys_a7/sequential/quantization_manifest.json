@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "config": {
+    "name": "fashion_mnist_q16",
+    "model_path": "data/fashion_mnist/mlp_fashion_mnist.pt",
+    "dataset_path": "data/fashion_mnist.npz",
+    "output_root": "data/quantized_data",
+    "target": "nexys_a7",
+    "architecture": "sequential",
+    "dsp_bits": 48,
+    "device": "cpu",
+    "weight_bits": 16,
+    "bias_bits": 16,
+    "act_bits": 16,
+    "margin_weights": 0.0,
+    "margin_acts": 0.0,
+    "calibration_mode": "max",
+    "calibration_percentile": 99.9,
+    "activation_negative_slope": 0.015625,
+    "dsp_acc_max_utilization": 0.9,
+    "dsp_weight_search_max_steps": 24,
+    "lut_addr_bits_min": 3,
+    "lut_addr_bits_max_cap": 9,
+    "lut_max_words": 1024,
+    "lut_auto_window": 2,
+    "activation_score_memory_weight": 0.03,
+    "test_samples": 100,
+    "simulation_samples": null,
+    "fail_on_overflow": true,
+    "generate_report": true,
+    "generate_rtl": true
+  },
+  "target_profile": {
+    "name": "nexys_a7",
+    "transport": "uart",
+    "dsp_bits": 48,
+    "toolchain": "vivado",
+    "device": "xc7a100tcsg324-1",
+    "executables": [
+      "vivado"
+    ]
+  },
+  "quant_config": {
+    "weight_bits": 16,
+    "bias_bits": 16,
+    "act_bits": 16,
+    "dsp_bits": 48,
+    "margin_weights": 0.0,
+    "margin_acts": 0.0,
+    "calibration_mode": "max",
+    "calibration_percentile": 99.9,
+    "activation_negative_slope": 0.015625,
+    "dsp_acc_max_utilization": 0.9,
+    "dsp_weight_search_max_steps": 24,
+    "fpga_mode": "sequential",
+    "export_split_files": false,
+    "last_segment_strategy": "forbid_last",
+    "lut_addr_bits_min": 3,
+    "lut_addr_bits_max_cap": 9,
+    "lut_max_words": 1024,
+    "lut_auto_window": 2,
+    "activation_score_memory_weight": 0.03,
+    "activation_artifact_subdir": "activation_fpga",
+    "distribution_pdf_name": "distribution_analysis_report.pdf"
+  },
+  "paths": {
+    "model": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\fashion_mnist\\mlp_fashion_mnist.pt",
+    "dataset": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\fashion_mnist.npz",
+    "output": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential",
+    "quantized_dataset": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\fashion_mnist_quantized.npz",
+    "testbench_inputs": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\tb_inputs_stream.mem",
+    "testbench_outputs": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\tb_expected_outputs.mem",
+    "mem_layout": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\mem_layout.json"
+  },
+  "simulation": {
+    "samples": 60000,
+    "target": "nexys_a7",
+    "architecture": "sequential",
+    "transport": "uart",
+    "dsp_bits": 48,
+    "input_exp": 14,
+    "output_exp": 7,
+    "overflow_count": 0,
+    "float_accuracy": 0.9373166666666667,
+    "board_accuracy": 0.9371833333333334,
+    "class_agreement": 0.99975,
+    "exact_output_words_vs_float_quantized": 213677,
+    "total_output_words": 600000,
+    "exact_samples_vs_float_quantized": 4,
+    "mean_abs_lsb_vs_float_quantized": 0.8634433333333333,
+    "max_abs_lsb_vs_float_quantized": 6
+  },
+  "rtl_project": {
+    "mode": "sequential",
+    "topology": [
+      784,
+      64,
+      32,
+      10
+    ],
+    "num_linear": 3,
+    "mem_dir": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential",
+    "layout_path": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\mem_layout.json",
+    "generated_rtl_dir": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\src\\rtl\\generated\\src_nexys_sequential",
+    "generated_tcl": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\vivado\\create_soc_mlp_project_nexys.tcl",
+    "project_name": "SOC_MLP_nexys_a7_sequential",
+    "device": "xc7a100tcsg324-1",
+    "top_name": "SOC_MLP",
+    "dsp_pw": 48,
+    "generated_roms": {
+      "weight": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\src\\rtl\\generated\\src_nexys_sequential\\rom_weight_all.sv",
+      "bias": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\src\\rtl\\generated\\src_nexys_sequential\\rom_bias_all.sv",
+      "activation": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\src\\rtl\\generated\\src_nexys_sequential\\rom_act_all.sv"
+    },
+    "total_weight_words": 52544,
+    "total_bias_words": 106,
+    "total_activation_words": 0
+  },
+  "export": {
+    "export_dir": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential",
+    "scales_vh": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\scales.vh",
+    "weight_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\weight_all.mem",
+    "bias_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\bias_all.mem",
+    "act_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\act_all.mem",
+    "mem_layout_json": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\mem_layout.json",
+    "mem_layout": {
+      "format": "concat_mem_v1",
+      "description": "V2 sequential layout. ACT_W is shared by network input, activations, LUT words and final output.",
+      "bits": {
+        "act_bits": 16,
+        "weight_bits": 16,
+        "bias_bits": 16,
+        "dsp_bits": 48
+      },
+      "weight_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\weight_all.mem",
+      "bias_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\bias_all.mem",
+      "act_all_mem": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\act_all.mem",
+      "weights": [
+        {
+          "layer_name": "layer_0",
+          "layer_idx": 0,
+          "offset": 0,
+          "length": 50176,
+          "shape": [
+            64,
+            784
+          ]
+        },
+        {
+          "layer_name": "layer_1",
+          "layer_idx": 1,
+          "offset": 50176,
+          "length": 2048,
+          "shape": [
+            32,
+            64
+          ]
+        },
+        {
+          "layer_name": "layer_2",
+          "layer_idx": 2,
+          "offset": 52224,
+          "length": 320,
+          "shape": [
+            10,
+            32
+          ]
+        }
+      ],
+      "biases": [
+        {
+          "layer_name": "layer_0",
+          "layer_idx": 0,
+          "offset": 0,
+          "length": 64,
+          "shape": [
+            64
+          ]
+        },
+        {
+          "layer_name": "layer_1",
+          "layer_idx": 1,
+          "offset": 64,
+          "length": 32,
+          "shape": [
+            32
+          ]
+        },
+        {
+          "layer_name": "layer_2",
+          "layer_idx": 2,
+          "offset": 96,
+          "length": 10,
+          "shape": [
+            10
+          ]
+        }
+      ],
+      "activations": [
+        {
+          "layer_name": "layer_0",
+          "layer_idx": 0,
+          "offset": 0,
+          "length": 0,
+          "activation_name": "leaky_relu",
+          "implementation": "analytic_int",
+          "addr_bits": null,
+          "reordered_for_hdl_raw_addressing": false
+        },
+        {
+          "layer_name": "layer_1",
+          "layer_idx": 1,
+          "offset": 0,
+          "length": 0,
+          "activation_name": "leaky_relu",
+          "implementation": "analytic_int",
+          "addr_bits": null,
+          "reordered_for_hdl_raw_addressing": false
+        },
+        {
+          "layer_name": "layer_2",
+          "layer_idx": 2,
+          "offset": 0,
+          "length": 0,
+          "activation_name": null,
+          "implementation": "none",
+          "addr_bits": null,
+          "reordered_for_hdl_raw_addressing": false
+        }
+      ],
+      "total_weight_words": 52544,
+      "total_bias_words": 106,
+      "total_activation_words": 0
+    },
+    "total_weight_words": 52544,
+    "total_bias_words": 106,
+    "total_activation_words": 0,
+    "split_exports": null,
+    "act_width": 16,
+    "weight_width": 16,
+    "bias_width": 16,
+    "dsp_width": 48
+  }
+}

@@ -17,7 +17,7 @@ from config import ProjectPaths, QuantConfig
 from export import export_final_mem_artifacts, export_ph_val_pred_mem
 from fixed_point import quantize_to_int
 from fpga_sim import FPGASimulationResult, simulate_fpga
-from fpga_targets import TARGET_ALIASES, TARGET_PROFILES, TargetProfile
+from fpga_targets import TARGET_PROFILES, TargetProfile, normalize_target
 from lut import LUTSearchConfig, search_best_lut_size
 from quantize import optimize_dsp_weight_scales, quantize_model
 
@@ -81,10 +81,8 @@ def validate_quantization_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unknown quantization configuration keys: {unknown}")
     validated = {**DEFAULT_QUANTIZATION_CONFIG, **config}
 
-    target_key = str(validated["target"]).strip().lower().replace("-", "")
-    if target_key not in TARGET_ALIASES:
-        raise ValueError("target must be 'ultra96' or 'lattice'")
-    validated["target"] = TARGET_ALIASES[target_key]
+    # Reuse the common target normalization, including the nexys_a7 alias.
+    validated["target"] = normalize_target(validated["target"])
 
     architecture = str(validated["architecture"]).strip().lower()
     if architecture not in {"sequential", "pipeline"}:
@@ -356,19 +354,40 @@ def generate_rtl_project(
             dsp_pw=validated["dsp_bits"],
         )
 
-    generator = _load_python_file(
-        root / "src" / "tcl" / "remodel_lattice_project.py",
-        "recipe_remodel_lattice",
-    )
-    return generator.generate_project(
-        root,
-        layout_path,
-        fpga_mode=mode,
-        template_rel=f"src/rtl/src_lattice_{mode}",
-        project_name="SOC_MLP_lattice",
-        device=profile.device,
-        dsp_pw=validated["dsp_bits"],
-    )
+    if target == "lattice":
+        generator = _load_python_file(
+            root / "src" / "tcl" / "remodel_lattice_project.py",
+            "recipe_remodel_lattice",
+        )
+        return generator.generate_project(
+            root,
+            layout_path,
+            fpga_mode=mode,
+            template_rel=f"src/rtl/src_lattice_{mode}",
+            project_name="SOC_MLP_lattice",
+            device=profile.device,
+            dsp_pw=validated["dsp_bits"],
+        )
+
+    if target == "nexys_a7":
+        if mode != "sequential":
+            raise ValueError("Nexys A7 RTL generation currently supports sequential mode only")
+        generator = _load_python_file(
+            root / "src" / "tcl" / "remodel_nexys_project.py",
+            "recipe_remodel_nexys",
+        )
+        return generator.generate_project(
+            root,
+            layout_path,
+            fpga_mode=mode,
+            template_rel=f"src/rtl/src_nexys_{mode}",
+            generated_rel=f"src/rtl/generated/src_nexys_{mode}",
+            project_name="SOC_MLP_nexys_a7_sequential",
+            part_name=profile.device,
+            dsp_pw=validated["dsp_bits"],
+        )
+
+    raise ValueError(f"Unsupported FPGA target: {target}")
 
 
 def _json_default(value: Any):

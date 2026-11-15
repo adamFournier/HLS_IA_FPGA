@@ -12,6 +12,8 @@ from activations import (
     signed_ordered_addr_from_q,
     signed_ordered_frac_from_q,
 )
+from fpga_targets import normalize_target
+
 from fixed_point import (
     arithmetic_shift_right,
     dequantize_from_int,
@@ -200,8 +202,7 @@ def simulate_fpga(
         raise ValueError("No quantized layers are available for simulation")
     if architecture not in {"sequential", "pipeline"}:
         raise ValueError("architecture must be 'sequential' or 'pipeline'")
-    if target not in {"ultra96", "lattice"}:
-        raise ValueError("target must be 'ultra96' or 'lattice'")
+    target = normalize_target(target)
     if int(qcfg.dsp_bits) <= 0:
         raise ValueError("dsp_bits must be positive")
 
