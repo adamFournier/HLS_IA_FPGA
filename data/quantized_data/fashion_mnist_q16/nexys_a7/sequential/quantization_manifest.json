@@ -72,8 +72,13 @@
     "testbench_outputs": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\tb_expected_outputs.mem",
     "mem_layout": "C:\\Users\\adams\\Documents\\MLP_HLS-main\\data\\quantized_data\\fashion_mnist_q16\\nexys_a7\\sequential\\mem_layout.json"
   },
+  "dataset_splits": {
+    "calibration": "train",
+    "evaluation": "test",
+    "uart_export": "test"
+  },
   "simulation": {
-    "samples": 60000,
+    "samples": 10000,
     "target": "nexys_a7",
     "architecture": "sequential",
     "transport": "uart",
@@ -81,14 +86,14 @@
     "input_exp": 14,
     "output_exp": 7,
     "overflow_count": 0,
-    "float_accuracy": 0.9373166666666667,
-    "board_accuracy": 0.9347,
-    "class_agreement": 0.9920666666666667,
-    "exact_output_words_vs_float_quantized": 9156,
-    "total_output_words": 600000,
+    "float_accuracy": 0.8855,
+    "board_accuracy": 0.8846,
+    "class_agreement": 0.9927,
+    "exact_output_words_vs_float_quantized": 1541,
+    "total_output_words": 100000,
     "exact_samples_vs_float_quantized": 0,
-    "mean_abs_lsb_vs_float_quantized": 23.562391666666667,
-    "max_abs_lsb_vs_float_quantized": 203
+    "mean_abs_lsb_vs_float_quantized": 23.59099,
+    "max_abs_lsb_vs_float_quantized": 175
   },
   "rtl_project": {
     "mode": "sequential",

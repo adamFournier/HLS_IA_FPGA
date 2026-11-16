@@ -349,6 +349,11 @@ def load_dataset(dataset_npz: Path) -> dict:
     """
     with np.load(dataset_npz, allow_pickle=False) as ds:
         print("Available NPZ keys:", list(ds.files))
+        if "dataset_split" not in ds.files or str(ds["dataset_split"].item()) != "test":
+            raise ValueError(
+                "This NPZ is not marked as the held-out test split. "
+                "Regenerate it with the updated quantization.py before testing the board."
+            )
         x_int_key, x_raw = pick_npz_array(
             ds, ["x_int", "X_int", "inputs_int", "input_int"], ndim=2
         )

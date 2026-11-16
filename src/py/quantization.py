@@ -19,7 +19,8 @@ from fixed_point import quantize_to_int
 from fpga_sim import FPGASimulationResult, simulate_fpga
 from fpga_targets import TARGET_PROFILES, TargetProfile, normalize_target
 from lut import LUTSearchConfig, search_best_lut_size
-from quantize import optimize_dsp_weight_scales, quantize_model
+from quantize import optimize_dsp_weight_scales, quantize_model, collect_model_tensors
+from data_model import load_fashion_mnist_dataset
 
 
 DEFAULT_QUANTIZATION_CONFIG = {
@@ -293,6 +294,8 @@ def _export_simulated_dataset(
         x_int=simulation.input_q,
 
         y=targets,
+        dataset_split=np.asarray("test"),
+        calibration_split=np.asarray("train"),
 
         pred_float=float_prediction,
         pred_float_int=float_prediction_q,
@@ -452,17 +455,32 @@ def run_quantization(
         show_summary=show_summary,
     )
 
+    # TEST ONLY: hold out test images from scale calibration and LUT optimization.
+    # No changes to the quantized weights, scales, or activation LUTs are made here.
+    test_dataset = load_fashion_mnist_dataset(paths.dataset_path, split="test")
+    test_float_tensors = collect_model_tensors(
+        model=activation_results["model_bundle"].model,
+        x_np=test_dataset.x[:validated["simulation_samples"]] if validated["simulation_samples"] is not None else test_dataset.x,
+        activation_plan=activation_results["model_bundle"].activation_plan,
+        qcfg=qcfg,
+    )
+    evaluation_results = {
+        **activation_results,
+        "dataset": test_dataset,
+        "tensors": test_float_tensors,
+    }
     simulation = simulate_fpga(
         activation_results,
+        x_float=test_dataset.x,
         target=profile.name,
         architecture=validated["architecture"],
         max_samples=validated["simulation_samples"],
         strict=validated["fail_on_overflow"],
     )
-    simulation_summary = _build_simulation_summary(activation_results, simulation)
+    simulation_summary = _build_simulation_summary(evaluation_results, simulation)
     simulation_report = pd.DataFrame(simulation.layer_stats)
     simulation_report.to_csv(output_dir / "fpga_simulation_layers.csv", index=False)
-    dataset_path = _export_simulated_dataset(activation_results, simulation, output_dir)
+    dataset_path = _export_simulated_dataset(evaluation_results, simulation, output_dir)
     testbench_inputs, testbench_outputs = export_ph_val_pred_mem(
         npz_path=dataset_path,
         out_dir=output_dir,
@@ -502,6 +520,7 @@ def run_quantization(
             "testbench_outputs": str(testbench_outputs),
             "mem_layout": str(layout_path),
         },
+        "dataset_splits": {"calibration": "train", "evaluation": "test", "uart_export": "test"},
         "simulation": simulation_summary,
         "rtl_project": rtl_project,
         "export": export_result,
@@ -520,8 +539,10 @@ def run_quantization(
         print(f"DSP / transport: {validated['dsp_bits']} bits / {profile.transport}")
         print(f"Output          : {output_dir}")
         print(f"FPGA overflows  : {simulation.overflow_count}")
-        print(f"Float accuracy : {simulation_summary['float_accuracy']:.2%}")
-        print(f"FPGA accuracy  : {simulation_summary['board_accuracy']:.2%}")
+        print("Calibration     : x_train / y_train (weights/scales/LUTs)")
+        print("Evaluation      : x_test / y_test (held-out test set)")
+        print(f"Float test accuracy: {simulation_summary['float_accuracy']:.2%}")
+        print(f"FPGA simulated test accuracy: {simulation_summary['board_accuracy']:.2%}")
         print(f"Class agreement: {simulation_summary['class_agreement']:.2%}")
 
     return QuantizationRun(
