@@ -140,20 +140,19 @@ def resolve_project_root(explicit: Optional[Path] = None) -> Path:
     )
 
 
-def configured_dataset_path(project_root: Path) -> Path:
+def configured_dataset_path(project_root: Path, fpga_mode: str = DEFAULT_FPGA_MODE) -> Path:
     """Dataset selected by the USER CONFIGURATION block."""
-    return (
-        project_root
-        / DATASET_BASE_DIR
-        / DATASET_PROFILE
-        / DATASET_FILENAME
-    ).resolve()
+    profile = DATASET_PROFILE
+    if fpga_mode == 'pipeline' and profile.endswith('/sequential'):
+        profile = profile[:-len('sequential')] + 'pipeline'
+    return (project_root / DATASET_BASE_DIR / profile / DATASET_FILENAME).resolve()
 
 
 def resolve_dataset_path(
     explicit_dataset: Optional[Path],
     dataset_dir: Optional[Path],
     project_root: Path,
+    fpga_mode: str = DEFAULT_FPGA_MODE,
 ) -> Path:
     """Resolve the dataset path without ambiguous recursive searching.
 
@@ -203,7 +202,7 @@ def resolve_dataset_path(
             "or pass --dataset explicitly."
         )
 
-    dataset = configured_dataset_path(project_root)
+    dataset = configured_dataset_path(project_root, fpga_mode)
 
     if not dataset.is_file():
         raise FileNotFoundError(
@@ -637,19 +636,17 @@ def resolve_serial_port(explicit_port: Optional[str]) -> str:
 
 
 def run_dataset(args: argparse.Namespace) -> int:
-    if args.fpga_mode != "sequential":
-        raise ValueError("The current Nexys A7 RTL generator supports sequential mode only")
     if args.progress_every <= 0:
         raise ValueError("--progress-every must be positive")
     if args.max_samples == 0:
         raise ValueError("--max-samples must be positive, or -1 for all samples")
 
     root = resolve_project_root(args.project_root)
-    dataset_npz = resolve_dataset_path(args.dataset, args.dataset_dir, root)
+    dataset_npz = resolve_dataset_path(args.dataset, args.dataset_dir, root, args.fpga_mode)
     scales_path = resolve_scales_vh(args.scales, root, args.fpga_mode)
     if scales_path is None:
         raise FileNotFoundError(
-            "Generated Nexys scales.vh is required: run quantization for nexys_a7/sequential first"
+            f"Generated Nexys scales.vh missing: run quantization for nexys_a7/{args.fpga_mode} first"
         )
     inferred_input_words, inferred_output_words = infer_words_from_scales(scales_path)
     data = load_dataset(dataset_npz)
@@ -674,12 +671,23 @@ def run_dataset(args: argparse.Namespace) -> int:
         raise ValueError("No dataset samples to transmit")
     x_test = x[:n_test]
     labels_test = labels[:n_test]
+    pipeline_delay = max(0, read_num_linear(scales_path) - 1) if args.fpga_mode == "pipeline" else 0
+    if args.fpga_mode == "pipeline" and args.warmup_transactions:
+        raise ValueError("Pipeline alignment requires --warmup-transactions 0")
+    if args.fpga_mode == "pipeline":
+        flush = np.full((pipeline_delay, input_size), args.flush_value, dtype=np.int16)
+        x_stream = np.vstack([x_test, flush])
+    else:
+        x_stream = x_test
+    n_stream = len(x_stream)
 
     print("\nNexys A7 / Fashion-MNIST UART configuration")
     print("  dataset        :", dataset_npz)
     print("  scales         :", scales_path)
-    print("  topology       : 784 -> 64 -> 32 -> 10 (sequential)")
+    print("  topology       : 784 -> 64 -> 32 -> 10 (" + args.fpga_mode + ")")
+    print("  pipeline_delay :", pipeline_delay, "frame(s)")
     print("  samples        :", n_test)
+    print("  transmitted    :", n_stream, "frames, including flush")
     print("  bitrate        :", args.baud, "baud, 8N1")
     print("  bytes/image    :", input_words * 2, "TX,", output_words * 2 + 4, "RX (10 scores + 32-bit cycles)")
     print("  wire format    : signed INT16, little-endian, no delimiter")
@@ -696,7 +704,7 @@ def run_dataset(args: argparse.Namespace) -> int:
     port = resolve_serial_port(args.port)
     out_dir = resolve_out_dir(args.out_dir, root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    y_fpga = np.zeros((n_test, output_words), dtype=np.int16)
+    y_raw = np.zeros((n_stream, output_words), dtype=np.int16)
     tx_hex, rx_hex = [], []
     fpga_cycles = []
 
@@ -706,10 +714,10 @@ def run_dataset(args: argparse.Namespace) -> int:
             ser, n=args.warmup_transactions, input_words=input_words,
             output_words=output_words, timeout_s=args.timeout,
         )
-        for i in range(n_test):
+        for i in range(n_stream):
             try:
                 received, tx_bytes, rx_bytes, cycles = transaction(
-                    ser, x_test[i], input_words=input_words,
+                    ser, x_stream[i], input_words=input_words,
                     output_words=output_words, timeout_s=args.timeout,
                     reset_input_buffer=args.reset_input_buffer_before_tx,
                 )
@@ -718,27 +726,35 @@ def run_dataset(args: argparse.Namespace) -> int:
                     f"Sample {i}: {exc}. Check that the Nexys bitstream is programmed, "
                     "the UART port is correct, baud rates match, and reset completed."
                 ) from exc
-            y_fpga[i] = received
+            y_raw[i] = received
             tx_hex.append(tx_bytes.hex())
             rx_hex.append(rx_bytes.hex())
             fpga_cycles.append(cycles)
             if i < args.preview:
-                pred = int(np.argmax(y_fpga[i]))
-                msg = f"image {i}: label={labels_test[i]}, FPGA_class={pred}, scores={y_fpga[i].tolist()}"
-                if pred_ref is not None:
-                    msg += f", reference_class={int(np.argmax(pred_ref[i]))}"
-                msg += f", MLP_compute={cycles / 100_000:.3f} ms ({cycles} cycles at 100 MHz)"
-                print(msg)
-            if (i + 1) % args.progress_every == 0 or i + 1 == n_test:
-                print(f"  {i + 1}/{n_test} images processed")
+                if args.fpga_mode == "sequential":
+                    pred = int(np.argmax(y_raw[i]))
+                    msg = f"image {i}: label={labels_test[i]}, FPGA_class={pred}, scores={y_raw[i].tolist()}"
+                    if pred_ref is not None:
+                        msg += f", reference_class={int(np.argmax(pred_ref[i]))}"
+                    msg += f", MLP_compute={cycles / 100_000:.3f} ms ({cycles} cycles at 100 MHz)"
+                    print(msg)
+                else:
+                    tag = "flush" if i >= n_test else "input"
+                    print(f"frame {i}: {tag}, raw_class={int(np.argmax(y_raw[i]))}, phase_cycles={cycles}")
+            if (i + 1) % args.progress_every == 0 or i + 1 == n_stream:
+                print(f"  {i + 1}/{n_stream} stream frames processed")
     elapsed = time.time() - started
 
+    y_fpga = y_raw[pipeline_delay:pipeline_delay + n_test]
+    fpga_cycles = fpga_cycles[pipeline_delay:pipeline_delay + n_test]
+    rx_hex = rx_hex[pipeline_delay:pipeline_delay + n_test]
+    tx_hex = tx_hex[:n_test]
     fpga_classes = np.argmax(y_fpga, axis=1).astype(np.int64)
     correct = fpga_classes == labels_test
     print("\nUART execution completed")
     print(f"Elapsed: {elapsed:.2f} s ({1000 * elapsed/n_test:.1f} ms/image incl. UART)")
     print(f"FPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
-    print(f"MLP hardware compute: {np.mean(fpga_cycles)/100_000:.3f} ms/image "
+    print(f"Hardware {'pipeline phase' if args.fpga_mode == 'pipeline' else 'MLP compute'}: {np.mean(fpga_cycles)/100_000:.3f} ms/image "
           f"(min={min(fpga_cycles)/100_000:.3f}, max={max(fpga_cycles)/100_000:.3f})")
 
     ref_class, matches_ref, errors = None, None, None
@@ -780,7 +796,10 @@ def run_dataset(args: argparse.Namespace) -> int:
     cols["tx_words_hex"] = tx_hex
     cols["rx_words_hex"] = rx_hex
     cols["transport"] = args.transport_label
-    cols["fpga_mode"] = "sequential"
+    cols["fpga_mode"] = args.fpga_mode
+    cols["pipeline_delay"] = pipeline_delay
+    cols["raw_output_frame"] = np.arange(pipeline_delay, pipeline_delay + n_test)
+    cols["mlp_timer_meaning"] = "phase_cycles" if args.fpga_mode == "pipeline" else "compute_cycles"
     cols["num_linear"] = read_num_linear(scales_path)
     cols["input_scale_exponent"] = (-1 if data["input_scale_exp"] is None else data["input_scale_exp"])
     cols["output_scale_exponent"] = (-1 if exp is None else exp)

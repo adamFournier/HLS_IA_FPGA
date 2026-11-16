@@ -373,8 +373,6 @@ def generate_rtl_project(
         )
 
     if target == "nexys_a7":
-        if mode != "sequential":
-            raise ValueError("Nexys A7 RTL generation currently supports sequential mode only")
         generator = _load_python_file(
             root / "src" / "tcl" / "remodel_nexys_project.py",
             "recipe_remodel_nexys",
@@ -385,7 +383,7 @@ def generate_rtl_project(
             fpga_mode=mode,
             template_rel=f"src/rtl/src_nexys_{mode}",
             generated_rel=f"src/rtl/generated/src_nexys_{mode}",
-            project_name="SOC_MLP_nexys_a7_sequential",
+            project_name=f"SOC_MLP_nexys_a7_{mode}",
             part_name=profile.device,
             dsp_pw=validated["dsp_bits"],
         )

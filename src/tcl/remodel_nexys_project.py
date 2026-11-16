@@ -1,4 +1,4 @@
-"""Standalone Nexys A7 / Vivado generator for a sequential UART MLP.
+"""Standalone Nexys A7 / Vivado generator for sequential and pipeline UART MLP.
 
 This file is independent of remodel_lattice_project.py and any Lattice module.
 It converts a quantization export (mem_layout.json, scales.vh, *.mem) into
@@ -44,6 +44,15 @@ NEXYS_RTL_FILES_SEQUENTIAL = [
     "soc_mlp.sv",
 ]
 
+NEXYS_RTL_FILES_PIPELINE_STATIC = [
+    "dsp.sv", "layer_ctrl.sv", "layer_datapath.sv", "phase_ctrl.sv",
+    "pp_buffer.sv", "mlp_pipeline.sv", "uart_rx.sv", "uart_tx.sv",
+    "uart_input.sv", "uart_output.sv", "soc_mlp.sv",
+]
+NEXYS_PIPELINE_PER_LAYER_TEMPLATES = (
+    "layer.sv", "rom_weight.sv", "rom_bias.sv", "rom_act.sv"
+)
+
 KNOWN_PLACEHOLDERS = {
     "memory_weight", "memory_bias", "memory_act_function",
     "layer_size_case", "weight_base_case", "bias_base_case",
@@ -51,6 +60,10 @@ KNOWN_PLACEHOLDERS = {
     "sx_case", "sw_case", "sb_case", "sp_case", "act_case",
     "lutn_case", "act_base_case", "weight_depth_expr",
     "bias_depth_expr", "dsp_pw_expr", "output_size_expr", "max_neurons_expr",
+    "module_layer_name", "module_weight_name", "module_bias_name", "module_act_name",
+    "n_tab_expr", "sx_tab_expr", "sw_tab_expr", "sb_tab_expr",
+    "sp_tab_expr", "act_tab_expr", "lutn_tab_expr",
+    "intermediate_buffers", "layer_instances",
 }
 
 
@@ -98,8 +111,6 @@ def parse_layout(layout_path: str | Path, mode_override: str | None = None) -> L
     path = Path(layout_path).resolve()
     layout = _read_json(path)
     mode = infer_mode(layout, mode_override)
-    if mode != "sequential":
-        raise NotImplementedError("Nexys A7 generator supports sequential mode only")
 
     weights = sorted(layout.get("weights", []), key=lambda w: int(w.get("layer_idx", 0)))
     biases = sorted(layout.get("biases", []), key=lambda b: int(b.get("layer_idx", 0)))
@@ -395,6 +406,299 @@ def copy_and_render_nexys_rtl(
     return out_dir
 
 
+# Pipeline export helpers are kept local so the Nexys backend does not
+# depend on Lattice tooling or its 32-bit DSP configuration.
+def _resolve_mem_path(mem_dir: Path, path_like: Any, fallback: str) -> Path:
+    if path_like is None:
+        return mem_dir / fallback
+    candidate = Path(str(path_like))
+    if candidate.is_absolute():
+        return candidate if candidate.exists() else mem_dir / candidate.name
+    return candidate if candidate.exists() else (
+        mem_dir / candidate if (mem_dir / candidate).exists() else mem_dir / candidate.name
+    )
+
+
+def _check_word_count(kind: str, mem_path: Path, words: list[int], expected: int, *, allow_empty_as_zero: bool = False) -> None:
+    if not (allow_empty_as_zero and len(words) == 0 and expected == 0):
+        _check_count(kind, words, expected)
+
+
+def _numeric_widths(scales: dict[str, int], dsp_pw: int) -> tuple[int, int, int]:
+    result = tuple(int(scales[x]) for x in ("ACT_W", "WEIGHT_W", "BIAS_W"))
+    if int(scales["DSP_PW"]) != dsp_pw or max(result) > dsp_pw:
+        raise ValueError("Pipeline scales mismatch with DSP width")
+    return result
+
+
+def _csv_expr(items: Iterable[str]) -> str:
+    return ", ".join(items)
+
+
+def _macro_list(prefix: str, count: int, *, start: int = 0) -> str:
+    return _csv_expr(f"`{prefix}{i}" for i in range(start, start + count))
+
+
+def _pipeline_buffer_name(idx: int, signal: str) -> str:
+    return f"inter{idx}_{signal}"
+
+
+def build_intermediate_buffers(info: LayoutInfo) -> str:
+    lines: list[str] = []
+    n = info.num_linear
+    for b in range(max(0, n - 1)):
+        depth_macro = _macro(b + 1)
+        aw_name = f"INTER{b}_AW"
+        lines.extend(
+            [
+                f"localparam int INTER{b}_DEPTH = {depth_macro};",
+                f"localparam int {aw_name} = (INTER{b}_DEPTH > 1) ? $clog2(INTER{b}_DEPTH) : 1;",
+                "",
+                f"logic                 inter{b}_rd_en;",
+                f"logic [{aw_name}-1:0] inter{b}_rd_addr;",
+                f"logic signed [ACT_W-1:0] inter{b}_rd_data;",
+                "",
+                f"logic                 inter{b}_wr_en;",
+                f"logic [{aw_name}-1:0] inter{b}_wr_addr;",
+                f"logic signed [ACT_W-1:0] inter{b}_wr_data;",
+                "",
+                "pp_buffer #(",
+                "    .ACT_W(ACT_W),",
+                f"    .DEPTH(INTER{b}_DEPTH),",
+                f"    .AW   ({aw_name})",
+                f") u_inter_pp_{b} (",
+                "    .clk        (clk),",
+                "",
+                "    .rd_bank_sel(phase_sel),",
+                f"    .rd_en      (inter{b}_rd_en),",
+                f"    .rd_addr    (inter{b}_rd_addr),",
+                f"    .rd_data    (inter{b}_rd_data),",
+                "",
+                "    .wr_bank_sel(~phase_sel),",
+                f"    .wr_en      (inter{b}_wr_en),",
+                f"    .wr_addr    (inter{b}_wr_addr),",
+                f"    .wr_data    (inter{b}_wr_data)",
+                ");",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def _layer_input_ports(layer_idx: int, num_layers: int) -> dict[str, str]:
+    if num_layers == 1 or layer_idx == 0:
+        return {
+            "in_rd_en": "in_rd_en",
+            "in_rd_addr": "in_rd_addr",
+            "in_rd_data": "in_rd_data",
+        }
+    prev = layer_idx - 1
+    return {
+        "in_rd_en": f"inter{prev}_rd_en",
+        "in_rd_addr": f"inter{prev}_rd_addr",
+        "in_rd_data": f"inter{prev}_rd_data",
+    }
+
+
+def _layer_output_ports(layer_idx: int, num_layers: int) -> dict[str, str]:
+    if num_layers == 1 or layer_idx == num_layers - 1:
+        return {
+            "out_wr_en": "out_wr_en",
+            "out_wr_addr": "out_wr_addr",
+            "out_wr_data": "out_wr_data",
+        }
+    return {
+        "out_wr_en": f"inter{layer_idx}_wr_en",
+        "out_wr_addr": f"inter{layer_idx}_wr_addr",
+        "out_wr_data": f"inter{layer_idx}_wr_data",
+    }
+
+
+def build_layer_instances(info: LayoutInfo) -> str:
+    lines: list[str] = []
+    n = info.num_linear
+    for l in range(n):
+        p_in = _layer_input_ports(l, n)
+        p_out = _layer_output_ports(l, n)
+        has_sp = "1'b1" if l < n - 1 else "1'b0"
+        sp_expr = _macro(l, "SP") if l < n - 1 else _macro(l + 1, "SX")
+
+        lines.extend(
+            [
+                f"layer_{l} #(",
+                f"    .ACT_TYPE         ({_macro(l, 'ACT')}),",
+                f"    .N_IN             ({_macro(l)}),",
+                f"    .N_OUT            ({_macro(l + 1)}),",
+                "    .ACT_W            (ACT_W),",
+                "    .WEIGHT_W         (WEIGHT_W),",
+                "    .BIAS_W           (BIAS_W),",
+                "    .LEAK_SHIFT       (LEAK_SHIFT_CFG),",
+                f"    .HAS_SP           ({has_sp}),",
+                f"    .Sx               ({_macro(l, 'SX')}),",
+                f"    .Sw               ({_macro(l, 'SW')}),",
+                f"    .Sb               ({_macro(l, 'SB')}),",
+                f"    .Sp               ({sp_expr}),",
+                f"    .Sx_out           ({_macro(l + 1, 'SX')}),",
+                f"    .LUT_N            ({_macro(l, 'LUT_N')}),",
+                "    .DSP_PW           (DSP_PW)",
+                f") u_layer_{l} (",
+                "    .clk        (clk),",
+                "    .rstn       (rstn),",
+                "    .start      (start_phase_pulse),",
+                f"    .in_rd_en   ({p_in['in_rd_en']}),",
+                f"    .in_rd_addr ({p_in['in_rd_addr']}),",
+                f"    .in_rd_data ({p_in['in_rd_data']}),",
+                f"    .out_wr_en  ({p_out['out_wr_en']}),",
+                f"    .out_wr_addr({p_out['out_wr_addr']}),",
+                f"    .out_wr_data({p_out['out_wr_data']}),",
+                f"    .done       (layer_done_pulse[{l}])",
+                ");",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def build_pipeline_sv_variables(info: LayoutInfo, scales: dict[str, int], *, dsp_pw: int = 32) -> dict[str, dict[str, str]]:
+    """Build placeholder dictionaries for the pipeline templates."""
+    n = info.num_linear
+    act_width, w_width, b_width = _numeric_widths(scales, dsp_pw)
+
+    common = {
+        "dsp_pw_expr": str(int(dsp_pw)),
+        "output_size_expr": _macro(n),
+        "max_neurons_expr": str(int(max(info.topology))),
+    }
+
+    mlp_vars = {
+        "n_tab_expr": _macro_list("N", n + 1),
+        "sx_tab_expr": _macro_list("SX", n + 1),
+        "sw_tab_expr": _macro_list("SW", n),
+        "sb_tab_expr": _macro_list("SB", n),
+        "sp_tab_expr": _macro_list("SP", max(0, n - 1)) if n > 1 else "0",
+        "act_tab_expr": _macro_list("ACT", n),
+        "lutn_tab_expr": _macro_list("LUT_N", n),
+        "intermediate_buffers": build_intermediate_buffers(info),
+        "layer_instances": build_layer_instances(info),
+    }
+
+    per_file: dict[str, dict[str, str]] = {
+        "common": common,
+        "mlp_pipeline.sv": mlp_vars,
+        "soc_mlp.sv": common,
+    }
+
+    bias_by_idx = {int(b.get("layer_idx", i)): b for i, b in enumerate(info.biases)}
+    act_by_idx = {int(a.get("layer_idx", i)): a for i, a in enumerate(info.activations)}
+
+    for i, w_item in enumerate(info.weights):
+        layer_idx = int(w_item.get("layer_idx", i))
+        b_item = bias_by_idx.get(layer_idx)
+        if b_item is None:
+            raise ValueError(f"Missing bias for layer_idx={layer_idx}")
+
+        w_path = _resolve_mem_path(info.mem_dir, w_item.get("file"), f"weight_layer{layer_idx}.mem")
+        b_path = _resolve_mem_path(info.mem_dir, b_item.get("file"), f"bias_layer{layer_idx}.mem")
+
+        w_words = read_mem_words(w_path, w_width)
+        b_words = read_mem_words(b_path, b_width)
+
+        _check_word_count(f"weight layer {layer_idx}", w_path, w_words, int(w_item.get("length", len(w_words))))
+        _check_word_count(f"bias layer {layer_idx}", b_path, b_words, int(b_item.get("length", len(b_words))))
+
+        layer_name = f"layer_{layer_idx}"
+        weight_name = f"rom_weight_{layer_idx}"
+        bias_name = f"rom_bias_{layer_idx}"
+        act_name = f"rom_act_{layer_idx}"
+
+        per_file[f"layer_{layer_idx}.sv"] = {
+            "module_layer_name": layer_name,
+            "module_weight_name": weight_name,
+            "module_bias_name": bias_name,
+            "module_act_name": act_name,
+        }
+        per_file[f"rom_weight_{layer_idx}.sv"] = {
+            "module_weight_name": weight_name,
+            "memory_weight": _format_memory_init(w_words, w_width),
+        }
+        per_file[f"rom_bias_{layer_idx}.sv"] = {
+            "module_bias_name": bias_name,
+            "memory_bias": _format_memory_init(b_words, b_width),
+        }
+
+        a_item = act_by_idx.get(layer_idx)
+        act_len = int(a_item.get("length", 0)) if a_item is not None else 0
+        act_file = a_item.get("file") if a_item is not None else None
+        if act_len > 0:
+            a_path = _resolve_mem_path(info.mem_dir, act_file, f"act_layer{layer_idx}.mem")
+            a_words = read_mem_words(a_path, act_width)
+            _check_word_count(f"activation layer {layer_idx}", a_path, a_words, act_len, allow_empty_as_zero=True)
+            per_file[f"rom_act_{layer_idx}.sv"] = {
+                "module_act_name": act_name,
+                "memory_act_function": _format_memory_init(a_words, act_width),
+            }
+
+    return per_file
+
+
+
+def copy_and_render_nexys_pipeline_rtl(
+    repo_root: str | Path,
+    info: LayoutInfo,
+    *,
+    template_rel: str,
+    generated_rel: str,
+    clean_generated: bool,
+    dsp_pw: int,
+) -> Path:
+    root = Path(repo_root).resolve()
+    template_dir = (root / template_rel).resolve()
+    out_dir = (root / generated_rel).resolve()
+    if not template_dir.is_dir():
+        raise FileNotFoundError(f"Nexys pipeline templates missing: {template_dir}")
+    if template_dir == out_dir or template_dir in out_dir.parents:
+        raise ValueError("Generated directory cannot overwrite templates")
+    required = NEXYS_RTL_FILES_PIPELINE_STATIC + list(NEXYS_PIPELINE_PER_LAYER_TEMPLATES)
+    missing = [name for name in required if not (template_dir / name).is_file()]
+    if missing:
+        raise FileNotFoundError(f"Missing Nexys pipeline templates: {missing}")
+    if clean_generated and out_dir.exists():
+        shutil.rmtree(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    header = sync_scales_vh(template_dir, out_dir, info.mem_dir)
+    scales = validate_scales_against_layout(header, info, dsp_pw)
+    substitutions = build_pipeline_sv_variables(info, scales, dsp_pw=dsp_pw)
+    common = substitutions.get("common", {})
+    for name in NEXYS_RTL_FILES_PIPELINE_STATIC:
+        rendered = render_sv_placeholders(
+            (template_dir / name).read_text(encoding="utf-8"),
+            {**common, **substitutions.get(name, {})},
+            filename=name,
+        )
+        (out_dir / name).write_text(rendered, encoding="utf-8")
+    for i in range(info.num_linear):
+        for name, template in (
+            (f"layer_{i}.sv", "layer.sv"),
+            (f"rom_weight_{i}.sv", "rom_weight.sv"),
+            (f"rom_bias_{i}.sv", "rom_bias.sv"),
+        ):
+            rendered = render_sv_placeholders(
+                (template_dir / template).read_text(encoding="utf-8"),
+                {**common, **substitutions[name]},
+                filename=name,
+            )
+            (out_dir / name).write_text(rendered, encoding="utf-8")
+        name = f"rom_act_{i}.sv"
+        if name in substitutions:
+            rendered = render_sv_placeholders(
+                (template_dir / "rom_act.sv").read_text(encoding="utf-8"),
+                {**common, **substitutions[name]},
+                filename=name,
+            )
+            (out_dir / name).write_text(rendered, encoding="utf-8")
+    return out_dir
+
+
 def find_nexys_xdc(root: Path, template_dir: Path) -> Path:
     candidates = [
         root / "constraints" / "nexys_a7.xdc",
@@ -434,7 +738,8 @@ def make_nexys_tcl(
     root = Path(repo_root).resolve()
     rtl_dir = Path(rtl_dir).resolve()
     xdc_path = Path(xdc_path).resolve()
-    output = Path(tcl_path or root / "vivado" / "create_soc_mlp_project_nexys.tcl").resolve()
+    tcl_name = ("create_soc_mlp_project_nexys_pipeline.tcl" if info.mode == "pipeline" else "create_soc_mlp_project_nexys.tcl")
+    output = Path(tcl_path or root / "vivado" / tcl_name).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     sources = sorted(path for path in rtl_dir.glob("*.sv") if path.is_file())
     if not sources:
@@ -445,7 +750,7 @@ def make_nexys_tcl(
     source_lines = "\n".join("    " + _tcl_quote(p) for p in sources)
     tcl_text = f'''# Auto-generated Nexys A7 Artix-7 Vivado project (UART MLP)
 # Topology: {" -> ".join(map(str, info.topology))}
-# Architecture: sequential
+# Architecture: {info.mode}
 set project_name {_tcl_quote(project_name)}
 set part_name {_tcl_quote(part_name)}
 set top_name {_tcl_quote(top_name)}
@@ -528,7 +833,8 @@ def generate_project(
     template_dir = (root / template_rel).resolve()
     # Check constraints before generating output, to fail early.
     xdc_path = find_nexys_xdc(root, template_dir)
-    rtl_dir = copy_and_render_nexys_rtl(
+    renderer = copy_and_render_nexys_pipeline_rtl if info.mode == 'pipeline' else copy_and_render_nexys_rtl
+    rtl_dir = renderer(
         root, info,
         template_rel=template_rel,
         generated_rel=generated_rel,
@@ -554,11 +860,15 @@ def generate_project(
         "device": part_name,
         "top_name": "SOC_MLP",
         "dsp_pw": dsp_pw,
-        "generated_roms": {
-            "weight": str(rtl_dir / "rom_weight_all.sv"),
-            "bias": str(rtl_dir / "rom_bias_all.sv"),
-            "activation": str(rtl_dir / "rom_act_all.sv"),
-        },
+        "generated_roms": (
+            {"weight": [str(rtl_dir / f"rom_weight_{i}.sv") for i in range(info.num_linear)],
+             "bias": [str(rtl_dir / f"rom_bias_{i}.sv") for i in range(info.num_linear)],
+             "layers": [str(rtl_dir / f"layer_{i}.sv") for i in range(info.num_linear)]}
+            if info.mode == "pipeline" else
+            {"weight": str(rtl_dir / "rom_weight_all.sv"),
+             "bias": str(rtl_dir / "rom_bias_all.sv"),
+             "activation": str(rtl_dir / "rom_act_all.sv")}
+        ),
         "total_weight_words": info.total_weight_words,
         "total_bias_words": info.total_bias_words,
         "total_activation_words": info.total_activation_words,
@@ -571,10 +881,10 @@ def main() -> None:
     )
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--layout", required=True)
-    parser.add_argument("--fpga-mode", default="sequential", choices=["sequential"])
-    parser.add_argument("--template-rel", default="src/rtl/src_nexys_sequential")
-    parser.add_argument("--generated-rel", default="src/rtl/generated/src_nexys_sequential")
-    parser.add_argument("--project-name", default="SOC_MLP_nexys_a7_sequential")
+    parser.add_argument("--fpga-mode", default="sequential", choices=["sequential", "pipeline"])
+    parser.add_argument("--template-rel", default=None)
+    parser.add_argument("--generated-rel", default=None)
+    parser.add_argument("--project-name", default=None)
     parser.add_argument("--part-name", default="xc7a100tcsg324-1")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--dsp-pw", type=int, default=48)
@@ -587,9 +897,9 @@ def main() -> None:
     result = generate_project(
         root, layout,
         fpga_mode=args.fpga_mode,
-        template_rel=args.template_rel,
-        generated_rel=args.generated_rel,
-        project_name=args.project_name,
+        template_rel=args.template_rel or f"src/rtl/src_nexys_{args.fpga_mode}",
+        generated_rel=args.generated_rel or f"src/rtl/generated/src_nexys_{args.fpga_mode}",
+        project_name=args.project_name or f"SOC_MLP_nexys_a7_{args.fpga_mode}",
         part_name=args.part_name,
         jobs=args.jobs,
         dsp_pw=args.dsp_pw,
