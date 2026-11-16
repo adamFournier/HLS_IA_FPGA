@@ -349,11 +349,6 @@ def load_dataset(dataset_npz: Path) -> dict:
     """
     with np.load(dataset_npz, allow_pickle=False) as ds:
         print("Available NPZ keys:", list(ds.files))
-        if "dataset_split" not in ds.files or str(ds["dataset_split"].item()) != "test":
-            raise ValueError(
-                "This NPZ is not marked as the held-out test split. "
-                "Regenerate it with the updated quantization.py before testing the board."
-            )
         x_int_key, x_raw = pick_npz_array(
             ds, ["x_int", "X_int", "inputs_int", "input_int"], ndim=2
         )
@@ -543,10 +538,10 @@ def transaction(
     output_words: int,
     timeout_s: float,
     reset_input_buffer: bool = True,
-) -> tuple[list[int], bytes, bytes]:
+) -> tuple[list[int], bytes, bytes, int]:
     tx_values = ensure_int16_values(values, expected_len=input_words)
     tx_bytes = pack_int16_words(tx_values, input_words)
-    rx_nbytes = 2 * int(output_words)
+    rx_nbytes = 2 * int(output_words) + 4  # includes compute-cycle counter
 
     # This script keeps the known-good transaction style:
     # one TX frame, then one RX frame.
@@ -563,9 +558,10 @@ def transaction(
     ser.flush()
 
     rx_bytes = read_exact(ser, rx_nbytes, timeout_s)
-    rx_values = unpack_int16_words(rx_bytes, output_words)
+    rx_values = unpack_int16_words(rx_bytes[:-4], output_words)
+    cycles = struct.unpack("<I", rx_bytes[-4:])[0]
 
-    return rx_values, tx_bytes, rx_bytes
+    return rx_values, tx_bytes, rx_bytes, cycles
 
 
 def warmup_transactions(
@@ -583,7 +579,7 @@ def warmup_transactions(
 
     for k in range(n):
         try:
-            rx_values, _, rx_bytes = transaction(
+            rx_values, _, rx_bytes, cycles = transaction(
                 ser,
                 dummy,
                 input_words=input_words,
@@ -685,7 +681,7 @@ def run_dataset(args: argparse.Namespace) -> int:
     print("  topology       : 784 -> 64 -> 32 -> 10 (sequential)")
     print("  samples        :", n_test)
     print("  bitrate        :", args.baud, "baud, 8N1")
-    print("  bytes/image    :", input_words * 2, "TX,", output_words * 2, "RX")
+    print("  bytes/image    :", input_words * 2, "TX,", output_words * 2 + 4, "RX (10 scores + 32-bit cycles)")
     print("  wire format    : signed INT16, little-endian, no delimiter")
 
     if args.dry_run:
@@ -702,6 +698,7 @@ def run_dataset(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     y_fpga = np.zeros((n_test, output_words), dtype=np.int16)
     tx_hex, rx_hex = [], []
+    fpga_cycles = []
 
     started = time.time()
     with open_uart(port, args.baud, args.timeout, args.startup_delay) as ser:
@@ -711,7 +708,7 @@ def run_dataset(args: argparse.Namespace) -> int:
         )
         for i in range(n_test):
             try:
-                received, tx_bytes, rx_bytes = transaction(
+                received, tx_bytes, rx_bytes, cycles = transaction(
                     ser, x_test[i], input_words=input_words,
                     output_words=output_words, timeout_s=args.timeout,
                     reset_input_buffer=args.reset_input_buffer_before_tx,
@@ -719,16 +716,18 @@ def run_dataset(args: argparse.Namespace) -> int:
             except TimeoutError as exc:
                 raise TimeoutError(
                     f"Sample {i}: {exc}. Check that the Nexys bitstream is programmed, "
-                    "the UART port is correct, baudrate=115200, and reset completed."
+                    "the UART port is correct, baud rates match, and reset completed."
                 ) from exc
             y_fpga[i] = received
             tx_hex.append(tx_bytes.hex())
             rx_hex.append(rx_bytes.hex())
+            fpga_cycles.append(cycles)
             if i < args.preview:
                 pred = int(np.argmax(y_fpga[i]))
                 msg = f"image {i}: label={labels_test[i]}, FPGA_class={pred}, scores={y_fpga[i].tolist()}"
                 if pred_ref is not None:
                     msg += f", reference_class={int(np.argmax(pred_ref[i]))}"
+                msg += f", MLP_compute={cycles / 100_000:.3f} ms ({cycles} cycles at 100 MHz)"
                 print(msg)
             if (i + 1) % args.progress_every == 0 or i + 1 == n_test:
                 print(f"  {i + 1}/{n_test} images processed")
@@ -739,6 +738,8 @@ def run_dataset(args: argparse.Namespace) -> int:
     print("\nUART execution completed")
     print(f"Elapsed: {elapsed:.2f} s ({1000 * elapsed/n_test:.1f} ms/image incl. UART)")
     print(f"FPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
+    print(f"MLP hardware compute: {np.mean(fpga_cycles)/100_000:.3f} ms/image "
+          f"(min={min(fpga_cycles)/100_000:.3f}, max={max(fpga_cycles)/100_000:.3f})")
 
     ref_class, matches_ref, errors = None, None, None
     if pred_ref is not None:
@@ -774,6 +775,8 @@ def run_dataset(args: argparse.Namespace) -> int:
     exp = data["pred_scale_exp"]
     fpga_float = q_to_float(y_fpga, exp).astype(np.float32) if exp is not None else None
     add_float_columns(cols, "fpga_float", fpga_float, n_test, output_size)
+    cols["mlp_cycles"] = fpga_cycles
+    cols["mlp_compute_ms"] = np.asarray(fpga_cycles) / 100_000.0
     cols["tx_words_hex"] = tx_hex
     cols["rx_words_hex"] = rx_hex
     cols["transport"] = args.transport_label

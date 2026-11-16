@@ -2,7 +2,7 @@
 
 module SOC_MLP #(
     parameter int CLK_FREQ       = 100_000_000,
-    parameter int BAUD_RATE      = 115200,
+    parameter int BAUD_RATE      = 921600,
     parameter int UART_IDLE_TIMEOUT_CYCLES = CLK_FREQ / 100, // 10 ms timeout
     parameter bit LED_ACTIVE_LOW = 1'b0
 )(
@@ -70,6 +70,25 @@ module SOC_MLP #(
 
     logic mlp_busy;
     logic mlp_done_pulse;
+
+    // Compute-only hardware timing, from start to done (100 MHz clock).
+    logic [31:0] mlp_cycles;
+    logic        mlp_timer_running;
+
+    always_ff @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            mlp_cycles        <= 32'd0;
+            mlp_timer_running <= 1'b0;
+        end else if (input_consume_pulse) begin
+            mlp_cycles        <= 32'd0;
+            mlp_timer_running <= 1'b1;
+        end else if (mlp_timer_running) begin
+            mlp_cycles <= mlp_cycles + 32'd1;
+            if (mlp_done_pulse)
+                mlp_timer_running <= 1'b0;
+        end
+    end
+
 
     // -------------------------------------------------------------------------
     // RAM ports driven by uart_input.
@@ -259,6 +278,7 @@ module SOC_MLP #(
         .clk          (clk),
         .rstn         (rstn),
         .produce_pulse(output_produce_pulse),
+        .mlp_cycles   (mlp_cycles),
         .busy         (output_busy),
         .done_pulse   (output_done_pulse),
         .rd_bank_sel  (uart_out_rd_bank_sel),

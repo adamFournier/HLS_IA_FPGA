@@ -18,6 +18,7 @@ module uart_output #(
     // Pulse from the MLP engine when the last layer has written
     // the final output vector into FINAL_BANK_SEL.
     input  logic                 produce_pulse,
+    input  logic [31:0]          mlp_cycles,
     output logic                 busy,
     output logic                 done_pulse,
 
@@ -32,14 +33,16 @@ module uart_output #(
     input  logic                 tx_busy
 );
 
-    typedef enum logic [2:0] {
+    typedef enum logic [3:0] {
         S_IDLE,
         S_FETCH,
         S_SEND_LSB,
         S_WAIT_LSB,
         S_SEND_MSB,
         S_WAIT_MSB,
-        S_NEXT
+        S_NEXT,
+        S_SEND_TIMER,
+        S_WAIT_TIMER
     } state_t;
 
     state_t state;
@@ -49,6 +52,8 @@ module uart_output #(
     logic signed [ACT_W-1:0]     data_reg;
     logic signed [15:0]       tx_word;
     logic                    last_reg;
+    logic [31:0]             timer_reg;
+    logic [1:0]              timer_byte_idx;
 
     // Fixed UART output protocol: signed 16-bit words, little-endian.
     // If ACT_W is smaller than 16 bits, the value is sign-extended to 16 bits.
@@ -90,6 +95,13 @@ module uart_output #(
                 end
             end
 
+            S_SEND_TIMER: begin
+                if (!tx_busy) begin
+                    tx_data  = timer_reg[8*timer_byte_idx +: 8];
+                    tx_valid = 1'b1;
+                end
+            end
+
             default: begin
             end
         endcase
@@ -102,6 +114,8 @@ module uart_output #(
             send_ptr    <= '0;
             data_reg    <= '0;
             last_reg    <= 1'b0;
+            timer_reg   <= 32'd0;
+            timer_byte_idx <= 2'd0;
             done_pulse  <= 1'b0;
         end else begin
             done_pulse <= 1'b0;
@@ -114,6 +128,8 @@ module uart_output #(
                 S_IDLE: begin
                     send_ptr <= '0;
                     if (result_full) begin
+                        timer_reg <= mlp_cycles; // stable after compute_done_pulse
+                        timer_byte_idx <= 2'd0;
                         state <= S_FETCH;
                     end
                 end
@@ -146,9 +162,9 @@ module uart_output #(
                 S_WAIT_MSB: begin
                     if (!tx_busy) begin
                         if (last_reg) begin
-                            result_full <= 1'b0;
-                            done_pulse  <= 1'b1;
-                            state       <= S_IDLE;
+                            // Append four little-endian bytes of compute cycles.
+                            timer_byte_idx <= 2'd0;
+                            state <= S_SEND_TIMER;
                         end else begin
                             state <= S_NEXT;
                         end
@@ -158,6 +174,24 @@ module uart_output #(
                 S_NEXT: begin
                     send_ptr <= send_ptr + AW'(1);
                     state    <= S_FETCH;
+                end
+
+                S_SEND_TIMER: begin
+                    if (!tx_busy)
+                        state <= S_WAIT_TIMER;
+                end
+
+                S_WAIT_TIMER: begin
+                    if (!tx_busy) begin
+                        if (timer_byte_idx == 2'd3) begin
+                            result_full <= 1'b0;
+                            done_pulse <= 1'b1;
+                            state <= S_IDLE;
+                        end else begin
+                            timer_byte_idx <= timer_byte_idx + 2'd1;
+                            state <= S_SEND_TIMER;
+                        end
+                    end
                 end
 
                 default: begin
