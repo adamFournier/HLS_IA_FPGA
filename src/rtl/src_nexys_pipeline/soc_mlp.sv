@@ -84,8 +84,10 @@ module SOC_MLP #(
     localparam int NUM_LAYERS = `NUM_LINEAR;
     logic start_phase_pulse;
     logic last_layer_done_pulse;
-    logic [63:0] active_compute_cycles;
-    logic [63:0] image_start_cycles [0:NUM_LAYERS-1];
+    // 32 bits wrap after ~42.95 seconds of active compute at 100 MHz;
+    // modulo subtraction remains exact for every shorter inference.
+    logic [31:0] active_compute_cycles;
+    logic [31:0] image_start_cycles [0:NUM_LAYERS-1];
     logic [NUM_LAYERS-1:0] image_start_valid;
     logic [31:0] image_inference_cycles;
 
@@ -100,14 +102,14 @@ module SOC_MLP #(
 
     always_ff @(posedge clk or negedge rstn) begin
         if (!rstn) begin
-            active_compute_cycles <= 64'd0;
+            active_compute_cycles <= 32'd0;
             image_inference_cycles <= 32'd0;
             image_start_valid <= '0;
             for (int j = 0; j < NUM_LAYERS; j = j + 1)
-                image_start_cycles[j] <= 64'd0;
+                image_start_cycles[j] <= 32'd0;
         end else begin
             if (phase_active)
-                active_compute_cycles <= active_compute_cycles + 64'd1;
+                active_compute_cycles <= active_compute_cycles + 32'd1;
 
             // The first layer starts a new image each phase. Keep the
             // timestamps aligned with the vectors in the intermediate banks.
@@ -126,9 +128,8 @@ module SOC_MLP #(
             // by Python, as are the corresponding warmup predictions.
             if (last_layer_done_pulse) begin
                 if (image_start_valid[NUM_LAYERS-1])
-                    image_inference_cycles <= 32'(
-                        active_compute_cycles - image_start_cycles[NUM_LAYERS-1]
-                    );
+                    image_inference_cycles <=
+                        active_compute_cycles - image_start_cycles[NUM_LAYERS-1];
                 else
                     image_inference_cycles <= 32'd0;
             end
