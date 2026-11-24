@@ -8,6 +8,9 @@
 //   - one word = two UART bytes, LSB first
 //   - internal ACT_W-bit values are sign-extended to 16 bits
 //   - output RAM bank availability follows the same phase/bank_full interface
+//   - after scores: 4 bytes image inference latency + 4 bytes phase duration
+//     (unsigned uint32, little endian). 10 outputs => 28 bytes per frame.
+//     Sequential RTL uses the original 24-byte output protocol.
 //
 // This module assumes ACT_W <= 16.
 // -----------------------------------------------------------------------------
@@ -24,7 +27,8 @@ module uart_output #(
     input  logic                 phase_sel,
     input  logic                 phase_active,
     input  logic                 produce_pulse,
-    input  logic [31:0]          mlp_cycles,
+    input  logic [31:0]          image_latency_cycles,
+    input  logic [31:0]          phase_cycles,
     output logic [1:0]           bank_full,
 
     // Read interface to the vector RAM bank.
@@ -58,9 +62,10 @@ module uart_output #(
     logic signed [ACT_W-1:0] data_reg;
     logic signed [15:0]   tx_word;
     logic                 last_reg;
-    logic [31:0]          bank_cycles [0:1];
-    logic [31:0]          timer_reg;
-    logic [1:0]           timer_byte_idx;
+    // [31:0] image latency, [63:32] global phase active cycles.
+    logic [63:0]          bank_cycles [0:1];
+    logic [63:0]          timer_reg;
+    logic [2:0]           timer_byte_idx;
 
     logic                 have_bank_to_send;
     logic                 pick_bank;
@@ -137,15 +142,15 @@ module uart_output #(
             send_ptr      <= '0;
             data_reg      <= '0;
             last_reg      <= 1'b0;
-            timer_reg <= 32'd0;
-            timer_byte_idx <= 2'd0;
-            bank_cycles[0] <= 32'd0;
-            bank_cycles[1] <= 32'd0;
+            timer_reg <= 64'd0;
+            timer_byte_idx <= 3'd0;
+            bank_cycles[0] <= 64'd0;
+            bank_cycles[1] <= 64'd0;
         end else begin
 
             if (produce_pulse) begin
                 bank_full[phase_sel] <= 1'b1;
-                bank_cycles[phase_sel] <= mlp_cycles;
+                bank_cycles[phase_sel] <= {phase_cycles, image_latency_cycles};
             end
 
             unique case (state)
@@ -154,7 +159,7 @@ module uart_output #(
                     if (have_bank_to_send) begin
                         send_bank_reg <= pick_bank;
                         timer_reg <= bank_cycles[pick_bank];
-                        timer_byte_idx <= 2'd0;
+                        timer_byte_idx <= 3'd0;
                         state         <= S_FETCH;
                     end
                 end
@@ -188,7 +193,7 @@ module uart_output #(
                 S_WAIT_MSB: begin
                     if (!tx_busy) begin
                         if (last_reg) begin
-                            timer_byte_idx <= 2'd0;
+                            timer_byte_idx <= 3'd0;
                             state <= S_SEND_TIMER;
                         end else begin
                             state <= S_NEXT;
@@ -205,11 +210,11 @@ module uart_output #(
                 end
                 S_WAIT_TIMER: begin
                     if (!tx_busy) begin
-                        if (timer_byte_idx == 2'd3) begin
+                        if (timer_byte_idx == 3'd7) begin
                             bank_full[send_bank_reg] <= 1'b0;
                             state <= S_IDLE;
                         end else begin
-                            timer_byte_idx <= timer_byte_idx + 2'd1;
+                            timer_byte_idx <= timer_byte_idx + 3'd1;
                             state <= S_SEND_TIMER;
                         end
                     end
