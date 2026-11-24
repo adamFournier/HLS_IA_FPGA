@@ -635,6 +635,51 @@ def resolve_serial_port(explicit_port: Optional[str]) -> str:
     )
 
 
+def inference_only_cycles(
+    raw_frame_cycles: Iterable[int],
+    *,
+    n_images: int,
+    n_layers: int,
+    fpga_mode: str,
+) -> tuple[np.ndarray, int]:
+    """Reconstruct inference-only timing from hardware counters.
+
+    The sequential RTL returns the full compute time per image. The pipeline
+    RTL returns one active global-phase duration per output frame. Image i
+    traverses phases i .. i+n_layers-1, hence its inference-only latency is
+    the sum of those measured phase durations. Pauses between phases (notably
+    UART input/output and host round trips) are deliberately excluded.
+
+    Total batch inference time includes pipeline fill/drain phases and is
+    therefore the sum of ALL received phase durations, not the sum of the
+    overlapping per-image latencies.
+    """
+    measured = np.asarray(list(raw_frame_cycles), dtype=np.uint64)
+    if n_images <= 0 or n_layers <= 0:
+        raise ValueError("n_images and n_layers must be positive")
+
+    if fpga_mode == "pipeline":
+        expected = n_images + n_layers - 1
+        if measured.size != expected:
+            raise ValueError(f"Expected {expected} pipeline counters, got {measured.size}")
+        image_cycles = np.asarray(
+            [np.sum(measured[i : i + n_layers], dtype=np.uint64)
+             for i in range(n_images)],
+            dtype=np.uint64,
+        )
+    elif fpga_mode == "sequential":
+        if measured.size != n_images:
+            raise ValueError(f"Expected {n_images} sequential counters, got {measured.size}")
+        image_cycles = measured.copy()
+    else:
+        raise ValueError(f"Unknown FPGA mode: {fpga_mode}")
+
+    batch_cycles = int(np.sum(measured, dtype=np.uint64))
+    if batch_cycles <= 0:
+        raise ValueError("All FPGA cycle counters are zero: cannot measure inference")
+    return image_cycles, batch_cycles
+
+
 def run_dataset(args: argparse.Namespace) -> int:
     if args.progress_every <= 0:
         raise ValueError("--progress-every must be positive")
@@ -671,7 +716,8 @@ def run_dataset(args: argparse.Namespace) -> int:
         raise ValueError("No dataset samples to transmit")
     x_test = x[:n_test]
     labels_test = labels[:n_test]
-    pipeline_delay = max(0, read_num_linear(scales_path) - 1) if args.fpga_mode == "pipeline" else 0
+    num_layers = read_num_linear(scales_path)
+    pipeline_delay = max(0, num_layers - 1) if args.fpga_mode == "pipeline" else 0
     if args.fpga_mode == "pipeline" and args.warmup_transactions:
         raise ValueError("Pipeline alignment requires --warmup-transactions 0")
     if args.fpga_mode == "pipeline":
@@ -740,22 +786,51 @@ def run_dataset(args: argparse.Namespace) -> int:
                     print(msg)
                 else:
                     tag = "flush" if i >= n_test else "input"
-                    print(f"frame {i}: {tag}, raw_class={int(np.argmax(y_raw[i]))}, phase_cycles={cycles}")
+                    print(f"frame {i}: {tag}, raw_class={int(np.argmax(y_raw[i]))}, phase_cycles={cycles} (one phase only)")
             if (i + 1) % args.progress_every == 0 or i + 1 == n_stream:
                 print(f"  {i + 1}/{n_stream} stream frames processed")
     elapsed = time.time() - started
 
+    # The FPGA sends one counter per output frame. In pipeline mode these
+    # counters describe *phases*, not complete inference for that frame.
+    raw_phase_cycles = np.asarray(fpga_cycles, dtype=np.uint64)
+    image_inference_cycles, batch_inference_cycles = inference_only_cycles(
+        raw_phase_cycles, n_images=n_test, n_layers=num_layers,
+        fpga_mode=args.fpga_mode,
+    )
+    image_inference_ms = image_inference_cycles.astype(np.float64) / 100_000.0
+    batch_inference_ms = batch_inference_cycles / 100_000.0
+    batch_throughput = n_test * 100_000_000.0 / batch_inference_cycles
+    aligned_phase_cycles = raw_phase_cycles[pipeline_delay:pipeline_delay + n_test]
+
     y_fpga = y_raw[pipeline_delay:pipeline_delay + n_test]
-    fpga_cycles = fpga_cycles[pipeline_delay:pipeline_delay + n_test]
     rx_hex = rx_hex[pipeline_delay:pipeline_delay + n_test]
     tx_hex = tx_hex[:n_test]
     fpga_classes = np.argmax(y_fpga, axis=1).astype(np.int64)
     correct = fpga_classes == labels_test
-    print("\nUART execution completed")
-    print(f"Elapsed: {elapsed:.2f} s ({1000 * elapsed/n_test:.1f} ms/image incl. UART)")
-    print(f"FPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
-    print(f"Hardware {'pipeline phase' if args.fpga_mode == 'pipeline' else 'MLP compute'}: {np.mean(fpga_cycles)/100_000:.3f} ms/image "
-          f"(min={min(fpga_cycles)/100_000:.3f}, max={max(fpga_cycles)/100_000:.3f})")
+
+    print("\n=== FPGA INFERENCE ONLY (UART and Python excluded) ===")
+    print(f"Image latency : {np.mean(image_inference_ms):.3f} ms/image "
+          f"(min={np.min(image_inference_ms):.3f}, max={np.max(image_inference_ms):.3f})")
+    print(f"Total inference time ({n_test} images): {batch_inference_ms:.3f} ms "
+          f"({batch_inference_cycles} active clock cycles)")
+    print(f"Batch throughput ({n_test} images): {batch_throughput:.1f} images/s")
+    if args.fpga_mode == "pipeline":
+        mean_phase_cycles = float(np.mean(raw_phase_cycles))
+        steady_throughput = 100_000_000.0 / mean_phase_cycles
+        print(f"Pipeline steady-state throughput: {steady_throughput:.1f} images/s")
+        print(f"Measured average pipeline phase: {mean_phase_cycles / 100_000.0:.3f} ms")
+        print("NOTE: per-image latency is reconstructed from the measured phase "
+              "counters with UART-induced idle gaps removed; it is not a "
+              "wall-clock entry-to-exit measurement.")
+    else:
+        steady_throughput = batch_throughput
+    print(f"\nFPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
+    print(f"UART + PC total elapsed (NOT inference-only): {elapsed:.2f} s")
+    for i in range(min(args.preview, n_test)):
+        print(f"image {i}: FPGA_class={int(fpga_classes[i])}, "
+              f"inference_latency={image_inference_ms[i]:.3f} ms "
+              f"({int(image_inference_cycles[i])} cycles)")
 
     ref_class, matches_ref, errors = None, None, None
     if pred_ref is not None:
@@ -791,15 +866,27 @@ def run_dataset(args: argparse.Namespace) -> int:
     exp = data["pred_scale_exp"]
     fpga_float = q_to_float(y_fpga, exp).astype(np.float32) if exp is not None else None
     add_float_columns(cols, "fpga_float", fpga_float, n_test, output_size)
-    cols["mlp_cycles"] = fpga_cycles
-    cols["mlp_compute_ms"] = np.asarray(fpga_cycles) / 100_000.0
+    # Backward-compatible names now refer to full image inference, not a
+    # single pipeline phase. Keep the raw counter in its own dedicated field.
+    cols["mlp_cycles"] = image_inference_cycles
+    cols["mlp_compute_ms"] = image_inference_ms
+    cols["inference_latency_cycles"] = image_inference_cycles
+    cols["inference_latency_ms"] = image_inference_ms
+    cols["batch_inference_cycles"] = batch_inference_cycles
+    cols["batch_inference_ms"] = batch_inference_ms
+    cols["batch_throughput_images_per_s"] = batch_throughput
+    cols["steady_state_throughput_images_per_s"] = steady_throughput
+    cols["raw_output_phase_cycles"] = aligned_phase_cycles
     cols["tx_words_hex"] = tx_hex
     cols["rx_words_hex"] = rx_hex
     cols["transport"] = args.transport_label
     cols["fpga_mode"] = args.fpga_mode
     cols["pipeline_delay"] = pipeline_delay
     cols["raw_output_frame"] = np.arange(pipeline_delay, pipeline_delay + n_test)
-    cols["mlp_timer_meaning"] = "phase_cycles" if args.fpga_mode == "pipeline" else "compute_cycles"
+    cols["mlp_timer_meaning"] = (
+        "image_latency_reconstructed_sum_of_phase_active_cycles"
+        if args.fpga_mode == "pipeline" else "image_compute_cycles"
+    )
     cols["num_linear"] = read_num_linear(scales_path)
     cols["input_scale_exponent"] = (-1 if data["input_scale_exp"] is None else data["input_scale_exp"])
     cols["output_scale_exponent"] = (-1 if exp is None else exp)
