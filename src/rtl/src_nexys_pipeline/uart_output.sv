@@ -39,7 +39,7 @@ module uart_output #(
     input  logic                 tx_busy
 );
 
-    typedef enum logic [2:0] {
+    typedef enum logic [3:0] {
         S_IDLE,
         S_FETCH,
         S_SEND_LSB,
