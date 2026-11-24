@@ -76,12 +76,63 @@ module SOC_MLP #(
     logic       phase_active;
     logic       in_consume_pulse;
     logic       out_produce_pulse;
-    // Phase duration, not complete per-image inference latency.
+    // FPGA-only inference timer. The active-time clock advances while the
+    // MLP pipeline is computing, but PAUSES while waiting for UART traffic.
+    // Each input's start timestamp follows that image through all the layers.
+    // Its end timestamp is captured when the LAST layer finishes (not when
+    // the slower layers finish the entire global pipeline phase).
+    localparam int NUM_LAYERS = `NUM_LINEAR;
+    logic start_phase_pulse;
+    logic last_layer_done_pulse;
+    logic [63:0] active_compute_cycles;
+    logic [63:0] image_start_cycles [0:NUM_LAYERS-1];
+    logic [NUM_LAYERS-1:0] image_start_valid;
+    logic [31:0] image_inference_cycles;
+
+    // Separate phase counter retained for total batch compute time and debit.
+    // It measures all active pipeline cycles, including pipeline warmup/flush.
     logic [31:0] phase_cycles;
     always_ff @(posedge clk or negedge rstn) begin
         if (!rstn) phase_cycles <= 32'd0;
         else if (!phase_active) phase_cycles <= 32'd0;
         else phase_cycles <= phase_cycles + 32'd1;
+    end
+
+    always_ff @(posedge clk or negedge rstn) begin
+        if (!rstn) begin
+            active_compute_cycles <= 64'd0;
+            image_inference_cycles <= 32'd0;
+            image_start_valid <= '0;
+            for (int j = 0; j < NUM_LAYERS; j = j + 1)
+                image_start_cycles[j] <= 64'd0;
+        end else begin
+            if (phase_active)
+                active_compute_cycles <= active_compute_cycles + 64'd1;
+
+            // The first layer starts a new image each phase. Keep the
+            // timestamps aligned with the vectors in the intermediate banks.
+            if (start_phase_pulse) begin
+                image_start_cycles[0] <= active_compute_cycles;
+                image_start_valid[0] <= 1'b1;
+                for (int j = 1; j < NUM_LAYERS; j = j + 1) begin
+                    image_start_cycles[j] <= image_start_cycles[j-1];
+                    image_start_valid[j] <= image_start_valid[j-1];
+                end
+            end
+
+            // Actual image-specific FPGA compute latency. Excludes UART
+            // transfers and wait gaps between global phases. Unprimed
+            // pipeline output frames carry zero latency and are discarded
+            // by Python, as are the corresponding warmup predictions.
+            if (last_layer_done_pulse) begin
+                if (image_start_valid[NUM_LAYERS-1])
+                    image_inference_cycles <= 32'(
+                        active_compute_cycles - image_start_cycles[NUM_LAYERS-1]
+                    );
+                else
+                    image_inference_cycles <= 32'd0;
+            end
+        end
     end
 
     // -------------------------------------------------------------------------
@@ -192,6 +243,8 @@ module SOC_MLP #(
 
         .phase_sel        (phase_sel),
         .phase_active     (phase_active),
+        .start_phase_pulse(start_phase_pulse),
+        .last_layer_done_pulse(last_layer_done_pulse),
         .in_consume_pulse (in_consume_pulse),
         .out_produce_pulse(out_produce_pulse),
 
@@ -246,7 +299,8 @@ module SOC_MLP #(
         .phase_sel    (phase_sel),
         .phase_active (phase_active),
         .produce_pulse(out_produce_pulse),
-        .mlp_cycles  (phase_cycles),
+        .image_latency_cycles(image_inference_cycles),
+        .phase_cycles(phase_cycles),
         .bank_full    (out_bank_full),
 
         .rd_bank_sel  (out_pp_rd_bank_sel),
