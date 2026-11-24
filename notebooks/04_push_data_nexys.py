@@ -843,30 +843,19 @@ def run_dataset(args: argparse.Namespace) -> int:
     fpga_classes = np.argmax(y_fpga, axis=1).astype(np.int64)
     correct = fpga_classes == labels_test
 
-    print("\n=== FPGA INFERENCE ONLY (UART and Python excluded) ===")
-    print(f"Image latency : {np.mean(image_inference_ms):.3f} ms/image "
-          f"(min={np.min(image_inference_ms):.3f}, max={np.max(image_inference_ms):.3f})")
-    print(f"Total inference time ({n_test} images): {batch_inference_ms:.3f} ms "
-          f"({batch_inference_cycles} active clock cycles)")
-    print(f"Batch throughput ({n_test} images): {batch_throughput:.1f} images/s")
     if args.fpga_mode == "pipeline":
         mean_phase_cycles = float(np.mean(raw_phase_cycles[:-1]))
         steady_throughput = 100_000_000.0 / mean_phase_cycles
-        print(f"Pipeline steady-state throughput: {steady_throughput:.1f} images/s")
-        print(f"Measured average pipeline phase: {mean_phase_cycles / 100_000.0:.3f} ms")
-        print("NOTE: image latency is measured directly by FPGA hardware "
-              "from first-layer start to final-layer done using an "
-              "active-only clock (UART idle gaps excluded).")
     else:
         steady_throughput = batch_throughput
-    print(f"\nFPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
-    print(f"Total real elapsed (UART + Python + FPGA): {elapsed:.3f} s "
-          f"({1000.0 * elapsed:.1f} ms for {n_test} images)")
-    print(f"End-to-end throughput (including UART): {n_test / elapsed:.1f} images/s")
-    for i in range(min(args.preview, n_test)):
-        print(f"image {i}: FPGA_class={int(fpga_classes[i])}, "
-              f"inference_latency={image_inference_ms[i]:.3f} ms "
-              f"({int(image_inference_cycles[i])} cycles)")
+
+    # Keep per-image details available before the compact final summary.
+    if args.preview:
+        print("\n--- Per-image FPGA inference latency ---")
+        for i in range(min(args.preview, n_test)):
+            print(f"image {i}: FPGA_class={int(fpga_classes[i])}, "
+                  f"inference_latency={image_inference_ms[i]:.3f} ms "
+                  f"({int(image_inference_cycles[i])} cycles)")
 
     ref_class, matches_ref, errors = None, None, None
     if pred_ref is not None:
@@ -880,6 +869,23 @@ def run_dataset(args: argparse.Namespace) -> int:
     else:
         ref_subset = None
         print("No INT16 software reference found: only classification labels are compared")
+
+    # Summary deliberately printed AFTER the optional per-image detail so
+    # the four figures requested for benchmarking are easy to find together.
+    print("\n" + "=" * 58)
+    print(f"  FPGA PERFORMANCE SUMMARY - {n_test} IMAGES")
+    print("=" * 58)
+    print("  INFERENCE ONLY (without UART / Python)")
+    print(f"    Latency per image   : {np.mean(image_inference_ms):.3f} ms "
+          f"(min {np.min(image_inference_ms):.3f}, max {np.max(image_inference_ms):.3f})")
+    print(f"    Time for {n_test} images : {batch_inference_ms:.3f} ms "
+          f"({batch_inference_cycles} cycles)")
+    print(f"    FPGA batch throughput: {batch_throughput:.1f} images/s")
+    print("  END-TO-END (including UART + Python + FPGA)")
+    print(f"    Total time          : {elapsed:.3f} s ({elapsed * 1000:.1f} ms)")
+    print(f"    End-to-end throughput: {n_test / elapsed:.1f} images/s")
+    print(f"  Classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
+    print("=" * 58)
 
     if pd is None:
         print("pandas not installed; CSV not written (pip install pandas)")
