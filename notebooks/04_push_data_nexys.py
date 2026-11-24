@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 """Send Fashion-MNIST INT16 images to a Nexys A7 FPGA over UART.
 
-Standalone adaptation of 04_push_data_nexys.py, preserving the UART framing,
-serial helpers and CSV reporting. Target RTL: sequential 784 -> 64 -> 32 -> 10.
+Nexys A7 test runner for sequential and pipelined MLP RTL.
 
 PC -> FPGA: 784 signed int16 pixels, little-endian, no frame delimiter.
-FPGA -> PC: 10 signed int16 class scores, little-endian, no delimiter.
+FPGA -> PC (sequential): 10 int16 scores + one uint32 compute-time counter.
+FPGA -> PC (pipeline): 10 int16 scores + two uint32 counters:
+    per-image inference latency, then global phase active cycles.
+All counters are measured on FPGA at 100 MHz and transmitted little-endian.
 The predicted class is argmax of the 10 received scores.
 
 Prerequisite: Program the Nexys A7 with the matching Vivado bitstream.
@@ -537,10 +539,13 @@ def transaction(
     output_words: int,
     timeout_s: float,
     reset_input_buffer: bool = True,
-) -> tuple[list[int], bytes, bytes, int]:
+    fpga_mode: str = "sequential",
+) -> tuple[list[int], bytes, bytes, int, int]:
     tx_values = ensure_int16_values(values, expected_len=input_words)
     tx_bytes = pack_int16_words(tx_values, input_words)
-    rx_nbytes = 2 * int(output_words) + 4  # includes compute-cycle counter
+    # Pipeline RTL sends two counters. The sequential bitstream still sends one.
+    timer_bytes = 8 if fpga_mode == "pipeline" else 4
+    rx_nbytes = 2 * int(output_words) + timer_bytes
 
     # This script keeps the known-good transaction style:
     # one TX frame, then one RX frame.
@@ -556,11 +561,24 @@ def transaction(
     ser.write(tx_bytes)
     ser.flush()
 
-    rx_bytes = read_exact(ser, rx_nbytes, timeout_s)
-    rx_values = unpack_int16_words(rx_bytes[:-4], output_words)
-    cycles = struct.unpack("<I", rx_bytes[-4:])[0]
+    try:
+        rx_bytes = read_exact(ser, rx_nbytes, timeout_s)
+    except TimeoutError as exc:
+        if fpga_mode == "pipeline":
+            raise TimeoutError(
+                f"{exc} Pipeline mode now requires a REBUILT bitstream: "
+                "10 scores + image-latency uint32 + phase-cycles uint32 "
+                "(28 bytes for 10 scores)."
+            ) from exc
+        raise
+    rx_values = unpack_int16_words(rx_bytes[:-timer_bytes], output_words)
+    if fpga_mode == "pipeline":
+        image_cycles, phase_cycles = struct.unpack("<II", rx_bytes[-8:])
+    else:
+        image_cycles = struct.unpack("<I", rx_bytes[-4:])[0]
+        phase_cycles = image_cycles
 
-    return rx_values, tx_bytes, rx_bytes, cycles
+    return rx_values, tx_bytes, rx_bytes, image_cycles, phase_cycles
 
 
 def warmup_transactions(
@@ -578,7 +596,7 @@ def warmup_transactions(
 
     for k in range(n):
         try:
-            rx_values, _, rx_bytes, cycles = transaction(
+            rx_values, _, rx_bytes, cycles, _ = transaction(
                 ser,
                 dummy,
                 input_words=input_words,
@@ -636,47 +654,62 @@ def resolve_serial_port(explicit_port: Optional[str]) -> str:
 
 
 def inference_only_cycles(
-    raw_frame_cycles: Iterable[int],
+    raw_image_cycles: Iterable[int],
+    raw_phase_cycles: Iterable[int],
     *,
     n_images: int,
     n_layers: int,
     fpga_mode: str,
 ) -> tuple[np.ndarray, int]:
-    """Reconstruct inference-only timing from hardware counters.
+    """Use image-specific FPGA timestamps, never infer latency from phases.
 
-    The sequential RTL returns the full compute time per image. The pipeline
-    RTL returns one active global-phase duration per output frame. Image i
-    traverses phases i .. i+n_layers-1, hence its inference-only latency is
-    the sum of those measured phase durations. Pauses between phases (notably
-    UART input/output and host round trips) are deliberately excluded.
+    Sequential: one real compute counter for each image.
+    Pipeline: output frame i+n_layers-1 carries the measured active-cycle
+    interval from the beginning of image i in layer 0 to the end of that
+    same image in the final layer. Idle gaps between phases (UART stalls)
+    are excluded by the FPGA's paused active-compute clock.
 
-    Total batch inference time includes pipeline fill/drain phases and is
-    therefore the sum of ALL received phase durations, not the sum of the
-    overlapping per-image latencies.
+    The batch clock counts active FPGA cycles from the first input's start
+    to the last real image's final-layer completion. Previous entire
+    phases are summed, but the final (flush) phase stops at last-layer
+    completion, instead of including dummy calculations after the output
+    was already ready.
     """
-    measured = np.asarray(list(raw_frame_cycles), dtype=np.uint64)
+    images = np.asarray(list(raw_image_cycles), dtype=np.uint64)
+    phases = np.asarray(list(raw_phase_cycles), dtype=np.uint64)
     if n_images <= 0 or n_layers <= 0:
         raise ValueError("n_images and n_layers must be positive")
 
     if fpga_mode == "pipeline":
         expected = n_images + n_layers - 1
-        if measured.size != expected:
-            raise ValueError(f"Expected {expected} pipeline counters, got {measured.size}")
-        image_cycles = np.asarray(
-            [np.sum(measured[i : i + n_layers], dtype=np.uint64)
-             for i in range(n_images)],
-            dtype=np.uint64,
-        )
+        if images.size != expected or phases.size != expected:
+            raise ValueError(
+                f"Expected {expected} hardware image/phase counters, "
+                f"got {images.size} image and {phases.size} phase counters"
+            )
+        image_cycles = images[n_layers - 1:n_layers - 1 + n_images]
+        # The last real image begins during phase n_images-1 and ends
+        # during phase expected-1. Subtract the *complete* phases of
+        # that image to find its final partial phase duration.
+        earlier_image_phases = int(np.sum(phases[n_images - 1:-1], dtype=np.uint64))
+        last_phase_partial = int(image_cycles[-1]) - earlier_image_phases
+        if not (0 <= last_phase_partial <= int(phases[-1])):
+            raise ValueError(
+                "Invalid pipeline timing alignment: last-image inference "
+                "time does not fit its measured phases. Check bitstream "
+                "version, UART frame length and FPGA pipeline mode."
+            )
+        batch_cycles = int(np.sum(phases[:-1], dtype=np.uint64)) + last_phase_partial
     elif fpga_mode == "sequential":
-        if measured.size != n_images:
-            raise ValueError(f"Expected {n_images} sequential counters, got {measured.size}")
-        image_cycles = measured.copy()
+        if images.size != n_images:
+            raise ValueError(f"Expected {n_images} image counters, got {images.size}")
+        image_cycles = images.copy()
+        batch_cycles = int(np.sum(image_cycles, dtype=np.uint64))
     else:
         raise ValueError(f"Unknown FPGA mode: {fpga_mode}")
 
-    batch_cycles = int(np.sum(measured, dtype=np.uint64))
-    if batch_cycles <= 0:
-        raise ValueError("All FPGA cycle counters are zero: cannot measure inference")
+    if batch_cycles <= 0 or np.any(image_cycles == 0):
+        raise ValueError("FPGA returned zero image inference cycles; verify hardware")
     return image_cycles, batch_cycles
 
 
@@ -735,7 +768,9 @@ def run_dataset(args: argparse.Namespace) -> int:
     print("  samples        :", n_test)
     print("  transmitted    :", n_stream, "frames, including flush")
     print("  bitrate        :", args.baud, "baud, 8N1")
-    print("  bytes/image    :", input_words * 2, "TX,", output_words * 2 + 4, "RX (10 scores + 32-bit cycles)")
+    timer_bytes = 8 if args.fpga_mode == "pipeline" else 4
+    print("  bytes/image    :", input_words * 2, "TX,", output_words * 2 + timer_bytes,
+          "RX (10 scores +", timer_bytes // 4, "FPGA uint32 counter(s))")
     print("  wire format    : signed INT16, little-endian, no delimiter")
 
     if args.dry_run:
@@ -752,7 +787,8 @@ def run_dataset(args: argparse.Namespace) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     y_raw = np.zeros((n_stream, output_words), dtype=np.int16)
     tx_hex, rx_hex = [], []
-    fpga_cycles = []
+    fpga_cycles = []  # true per-image FPGA inference cycles, raw frame order
+    phase_cycles_all = []  # active phase cycles, for batch timing and throughput
 
     started = time.time()
     with open_uart(port, args.baud, args.timeout, args.startup_delay) as ser:
@@ -762,10 +798,11 @@ def run_dataset(args: argparse.Namespace) -> int:
         )
         for i in range(n_stream):
             try:
-                received, tx_bytes, rx_bytes, cycles = transaction(
+                received, tx_bytes, rx_bytes, cycles, phase_cycles = transaction(
                     ser, x_stream[i], input_words=input_words,
                     output_words=output_words, timeout_s=args.timeout,
                     reset_input_buffer=args.reset_input_buffer_before_tx,
+                    fpga_mode=args.fpga_mode,
                 )
             except TimeoutError as exc:
                 raise TimeoutError(
@@ -776,18 +813,22 @@ def run_dataset(args: argparse.Namespace) -> int:
             tx_hex.append(tx_bytes.hex())
             rx_hex.append(rx_bytes.hex())
             fpga_cycles.append(cycles)
+            phase_cycles_all.append(phase_cycles)
             # Preview of aligned per-image scores and inference latency is
             # printed after all phases (including pipeline flush) are received.
             if (i + 1) % args.progress_every == 0 or i + 1 == n_stream:
                 print(f"  {i + 1}/{n_stream} stream frames processed")
     elapsed = time.time() - started
 
-    # The FPGA sends one counter per output frame. In pipeline mode these
-    # counters describe *phases*, not complete inference for that frame.
-    raw_phase_cycles = np.asarray(fpga_cycles, dtype=np.uint64)
+    # Pipeline FPGA: TWO independent hardware counters per output frame:
+    #   - exact compute-only latency of the output image
+    #   - active duration of the phase producing this output
+    # Sequential FPGA: legacy image compute counter (both fields are equal).
+    raw_image_cycles = np.asarray(fpga_cycles, dtype=np.uint64)
+    raw_phase_cycles = np.asarray(phase_cycles_all, dtype=np.uint64)
     image_inference_cycles, batch_inference_cycles = inference_only_cycles(
-        raw_phase_cycles, n_images=n_test, n_layers=num_layers,
-        fpga_mode=args.fpga_mode,
+        raw_image_cycles, raw_phase_cycles,
+        n_images=n_test, n_layers=num_layers, fpga_mode=args.fpga_mode,
     )
     image_inference_ms = image_inference_cycles.astype(np.float64) / 100_000.0
     batch_inference_ms = batch_inference_cycles / 100_000.0
@@ -807,17 +848,19 @@ def run_dataset(args: argparse.Namespace) -> int:
           f"({batch_inference_cycles} active clock cycles)")
     print(f"Batch throughput ({n_test} images): {batch_throughput:.1f} images/s")
     if args.fpga_mode == "pipeline":
-        mean_phase_cycles = float(np.mean(raw_phase_cycles))
+        mean_phase_cycles = float(np.mean(raw_phase_cycles[:-1]))
         steady_throughput = 100_000_000.0 / mean_phase_cycles
         print(f"Pipeline steady-state throughput: {steady_throughput:.1f} images/s")
         print(f"Measured average pipeline phase: {mean_phase_cycles / 100_000.0:.3f} ms")
-        print("NOTE: per-image latency is reconstructed from the measured phase "
-              "counters with UART-induced idle gaps removed; it is not a "
-              "wall-clock entry-to-exit measurement.")
+        print("NOTE: image latency is measured directly by FPGA hardware "
+              "from first-layer start to final-layer done using an "
+              "active-only clock (UART idle gaps excluded).")
     else:
         steady_throughput = batch_throughput
     print(f"\nFPGA classification accuracy: {correct.mean():.2%} ({correct.sum()}/{n_test})")
-    print(f"UART + PC total elapsed (NOT inference-only): {elapsed:.2f} s")
+    print(f"Total real elapsed (UART + Python + FPGA): {elapsed:.3f} s "
+          f"({1000.0 * elapsed:.1f} ms for {n_test} images)")
+    print(f"End-to-end throughput (including UART): {n_test / elapsed:.1f} images/s")
     for i in range(min(args.preview, n_test)):
         print(f"image {i}: FPGA_class={int(fpga_classes[i])}, "
               f"inference_latency={image_inference_ms[i]:.3f} ms "
@@ -868,6 +911,9 @@ def run_dataset(args: argparse.Namespace) -> int:
     cols["batch_throughput_images_per_s"] = batch_throughput
     cols["steady_state_throughput_images_per_s"] = steady_throughput
     cols["raw_output_phase_cycles"] = aligned_phase_cycles
+    cols["total_elapsed_with_uart_s"] = elapsed
+    cols["total_elapsed_with_uart_ms"] = elapsed * 1000.0
+    cols["throughput_with_uart_images_per_s"] = n_test / elapsed
     cols["tx_words_hex"] = tx_hex
     cols["rx_words_hex"] = rx_hex
     cols["transport"] = args.transport_label
@@ -875,8 +921,8 @@ def run_dataset(args: argparse.Namespace) -> int:
     cols["pipeline_delay"] = pipeline_delay
     cols["raw_output_frame"] = np.arange(pipeline_delay, pipeline_delay + n_test)
     cols["mlp_timer_meaning"] = (
-        "image_latency_reconstructed_sum_of_phase_active_cycles"
-        if args.fpga_mode == "pipeline" else "image_compute_cycles"
+        "hardware_measured_image_active_cycles_first_layer_to_last_layer"
+        if args.fpga_mode == "pipeline" else "hardware_measured_image_compute_cycles"
     )
     cols["num_linear"] = read_num_linear(scales_path)
     cols["input_scale_exponent"] = (-1 if data["input_scale_exp"] is None else data["input_scale_exp"])
