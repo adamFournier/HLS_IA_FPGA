@@ -790,12 +790,14 @@ def run_dataset(args: argparse.Namespace) -> int:
     fpga_cycles = []  # true per-image FPGA inference cycles, raw frame order
     phase_cycles_all = []  # active phase cycles, for batch timing and throughput
 
-    started = time.time()
     with open_uart(port, args.baud, args.timeout, args.startup_delay) as ser:
         warmup_transactions(
             ser, n=args.warmup_transactions, input_words=input_words,
             output_words=output_words, timeout_s=args.timeout,
         )
+        # Wall-clock for the actual dataset exchange, excluding port-opening
+        # and optional warmup. It still includes UART + PC + FPGA execution.
+        started = time.perf_counter()
         for i in range(n_stream):
             try:
                 received, tx_bytes, rx_bytes, cycles, phase_cycles = transaction(
@@ -818,7 +820,7 @@ def run_dataset(args: argparse.Namespace) -> int:
             # printed after all phases (including pipeline flush) are received.
             if (i + 1) % args.progress_every == 0 or i + 1 == n_stream:
                 print(f"  {i + 1}/{n_stream} stream frames processed")
-    elapsed = time.time() - started
+    elapsed = time.perf_counter() - started
 
     # Pipeline FPGA: TWO independent hardware counters per output frame:
     #   - exact compute-only latency of the output image
