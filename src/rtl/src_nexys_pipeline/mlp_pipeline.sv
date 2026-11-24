@@ -37,6 +37,8 @@ module mlp_pipeline #(
     // Global pipeline phase.
     output logic                                                phase_sel,
     output logic                                                phase_active,
+    output logic                                                start_phase_pulse,
+    output logic                                                last_layer_done_pulse,
     output logic                                                in_consume_pulse,
     output logic                                                out_produce_pulse,
 
@@ -87,7 +89,7 @@ module mlp_pipeline #(
     };
 
     logic [NUM_LINEAR_CFG-1:0] layer_done_pulse;
-    logic                      start_phase_pulse;
+    assign last_layer_done_pulse = layer_done_pulse[NUM_LINEAR_CFG-1];
 
     // -------------------------------------------------------------------------
     // Global phase controller.
