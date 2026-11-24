@@ -1,7 +1,7 @@
 """Regression tests for Nexys A7 FPGA inference timing and UART packets.
 
 Run with:
-    py -m unittest tests/test_nexys_pipeline_timing.py
+    py -m unittest discover -s tests -p test_nexys_pipeline_timing.py
 
 These tests check Python parsing/math only; Vivado synthesis and real board
 timing must still be validated on the Nexys A7.
