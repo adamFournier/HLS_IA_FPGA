@@ -776,17 +776,8 @@ def run_dataset(args: argparse.Namespace) -> int:
             tx_hex.append(tx_bytes.hex())
             rx_hex.append(rx_bytes.hex())
             fpga_cycles.append(cycles)
-            if i < args.preview:
-                if args.fpga_mode == "sequential":
-                    pred = int(np.argmax(y_raw[i]))
-                    msg = f"image {i}: label={labels_test[i]}, FPGA_class={pred}, scores={y_raw[i].tolist()}"
-                    if pred_ref is not None:
-                        msg += f", reference_class={int(np.argmax(pred_ref[i]))}"
-                    msg += f", MLP_compute={cycles / 100_000:.3f} ms ({cycles} cycles at 100 MHz)"
-                    print(msg)
-                else:
-                    tag = "flush" if i >= n_test else "input"
-                    print(f"frame {i}: {tag}, raw_class={int(np.argmax(y_raw[i]))}, phase_cycles={cycles} (one phase only)")
+            # Preview of aligned per-image scores and inference latency is
+            # printed after all phases (including pipeline flush) are received.
             if (i + 1) % args.progress_every == 0 or i + 1 == n_stream:
                 print(f"  {i + 1}/{n_stream} stream frames processed")
     elapsed = time.time() - started
